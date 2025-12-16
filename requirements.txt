@@ -1,0 +1,8 @@
+openai
+python-dotenv
+requests
+pymupdf
+pypdf
+beautifulsoup4
+lxml
+grobid-client-python

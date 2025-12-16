@@ -1,0 +1,19 @@
+
+{
+  "name": "reference-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "chromadb": "^1.8.0",
+    "langchain": "^0.1.0",
+    "@langchain/openai": "^0.0.5",
+    "openai": "^4.0.0",
+    "dotenv": "^16.4.0",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.3.136",
+    "pdf-lib": "^1.17.1",
+    "grobid-client": "^1.0.0",
+    "cheerio": "^1.0.0",
+    "fast-xml-parser": "^4.3.0"
+  }
+}
