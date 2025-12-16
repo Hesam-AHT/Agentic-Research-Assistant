@@ -69,7 +69,7 @@ export type A0State = {
   trace?: string[];
 };
 
-// LLM small brain
+// LLM small brain (maybe switch to deepsearch from openai????)
 
 const brainLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
 const decompLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
