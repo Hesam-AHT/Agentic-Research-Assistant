@@ -67,7 +67,7 @@ export type A0State = {
   citations?: any[];
 
   trace?: string[];
-};
+};code
 
 // LLM small brain (maybe switch to deepsearch from openai????)
 
