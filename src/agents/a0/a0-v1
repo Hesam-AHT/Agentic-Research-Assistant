@@ -1,16 +1,28 @@
+import 'dotenv/config';
 import { Agent, run, setDefaultOpenAIKey } from '@openai/agents';
-setDefaultOpenAIKey()
+// test KEY
+/*
+const apiKey = process.env.OPENAI_API_KEY;
+if (!apiKey) {
+  throw new Error("OPENAI_API_KEY is missing");
+}
+*/
+
+setDefaultOpenAIKey(process.env.OPENAI_API_KEY);
+
 const agent = new Agent({
   name: 'Assistant',
-  instructions: 'You are a helpful assistant', model : 'gpt-4o-mini',
-  apiKey:''
+  instructions: 'You are a helpful assistant',
+  model: 'gpt-4o-mini'
 });
 
 const result = await run(
   agent,
-  'Write a haiku about recursion in programming.',
+  'Write a haiku about recursion in programming.'
 );
+
 console.log(result.finalOutput);
+
 
 // Code within the code,
 // Functions calling themselves,
