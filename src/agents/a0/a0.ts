@@ -1,14 +1,14 @@
 import Redis from "ioredis";
 import { Agent, run, setDefaultOpenAIKey } from "@openai/agents";
 
-import { run as runA1, type A1Task, type Evidence } from "../agents/a1/a1";
-import { run as runA2, type A2Task, type A2Result } from "../agents/a2/a2";
+import { run as runA1, type A1Task, type Evidence } from "../agents/a1/a1.ts";
+import { run as runA2, type A2Task, type A2Result } from "../agents/a2/a2.ts";
 
 setDefaultOpenAIKey(process.env.OPENAI_API_KEY!);
 
 /* 
-   GLOBAL MEMORY (A0 ONLY)
- */
+  GLOBAL MEMORY (A0 ONLY)
+*/
 
 const redis = new Redis(process.env.REDIS_URL!);
 const memKey = (sid: string, ns: string) => `mem:${sid}:${ns}`;
@@ -28,7 +28,7 @@ async function write(
 }
 
 /* 
-   A0 PLANNER 
+  A0 PLANNER 
  */
 
 type PolicyPlan = {
@@ -60,7 +60,7 @@ Rules:
 });
 
 /* 
-   A0 CONTROLLER
+  A0 CONTROLLER
  */
 
 export async function runA0(input: {
