@@ -340,22 +340,22 @@ export function buildA0AnswerGraph(agents: AgentRegistry) {
   });
 
   const g = new StateGraph(stateAnnotation)
-    .addNode("entry", entryNode)
-    .addNode("brain", brainNode)
-    .addNode("keywords", keywordNode)
-    .addNode("decompose", decomposeNode)
-    .addNode("plan", planNode)
-    .addNode("dispatch", (state: A0State) => dispatchNode(state, { agents }))
-    .addNode("exit", exitNode);
+    .addNode("entryNode", entryNode)
+    .addNode("classifyNode", brainNode)
+    .addNode("extractKeywordsNode", keywordNode)
+    .addNode("decomposeNode", decomposeNode)
+    .addNode("planNode", planNode)
+    .addNode("dispatchNode", (state: A0State) => dispatchNode(state, { agents }))
+    .addNode("exitNode", exitNode);
 
-  g.setEntryPoint("entry");
-  g.addEdge("entry", "brain");
-  g.addEdge("brain", "keywords");
-  g.addEdge("keywords", "decompose");
-  g.addEdge("decompose", "plan");
-  g.addEdge("plan", "dispatch");
-  g.addEdge("dispatch", "exit");
-  g.addEdge("exit", END);
+  g.setEntryPoint("entryNode");
+  g.addEdge("entryNode", "classifyNode");
+  g.addEdge("classifyNode", "extractKeywordsNode");
+  g.addEdge("extractKeywordsNode", "decomposeNode");
+  g.addEdge("decomposeNode", "planNode");
+  g.addEdge("planNode", "dispatchNode");
+  g.addEdge("dispatchNode", "exitNode");
+  g.addEdge("exitNode", END);
 
   return g.compile();
 }

@@ -314,6 +314,49 @@ app.post("/api/feedback", async (req, res) => {
   }
 });
 
+// GET / - Root endpoint with API information and examples
+app.get("/", (req, res) => {
+  res.json({
+    name: "Agentic Research Assistant API",
+    version: "1.0.0",
+    status: "running",
+    endpoints: {
+      health: {
+        method: "GET",
+        path: "/api/health",
+        description: "Health check endpoint",
+        example: "curl http://localhost:3000/api/health",
+      },
+      query: {
+        method: "POST",
+        path: "/api/query",
+        description: "Submit a query with PDF file or DOI",
+        required: ["query"],
+        optional: ["file", "doi", "sessionId"],
+        examples: {
+          withFile: `curl -X POST http://localhost:3000/api/query \\
+  -F "file=@paper.pdf" \\
+  -F "query=What is the main contribution of this paper?"`,
+          withDOI: `curl -X POST http://localhost:3000/api/query \\
+  -H "Content-Type: application/json" \\
+  -d '{"query":"What methods are used?","doi":"10.1234/example.doi"}'`,
+        },
+      },
+      feedback: {
+        method: "POST",
+        path: "/api/feedback",
+        description: "Provide feedback on answers",
+        required: ["sessionId", "feedback"],
+        example: `curl -X POST http://localhost:3000/api/feedback \\
+  -H "Content-Type: application/json" \\
+  -d '{"sessionId":"session_123","feedback":{"helpful":true}}'`,
+      },
+    },
+    note: "POST endpoints cannot be accessed via browser. Use curl, Postman, or your frontend application.",
+    documentation: "See README.md for detailed API documentation",
+  });
+});
+
 // GET /api/health - Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
