@@ -1,34 +1,14 @@
-import Redis from "ioredis";
 import { Agent, run, setDefaultOpenAIKey } from "@openai/agents";
 
-import { run as runA1, type A1Task, type Evidence } from "../agents/a1/a1.ts";
-import { run as runA2, type A2Task, type A2Result } from "../agents/a2/a2.ts";
+import { run as runA1, type A1Task, type Evidence } from "../agents/a1/a1";
+import { run as runA2, type A2Task, type A2Result } from "../agents/a2/a2";
+
+import { GlobalMemory, Namespaces } from "../memory/GlobalMemory";
 
 setDefaultOpenAIKey(process.env.OPENAI_API_KEY!);
 
 /* 
-  GLOBAL MEMORY (A0 ONLY)
-*/
-
-const redis = new Redis(process.env.REDIS_URL!);
-const memKey = (sid: string, ns: string) => `mem:${sid}:${ns}`;
-
-async function read<T>(sid: string, ns: string): Promise<T | null> {
-  const v = await redis.get(memKey(sid, ns));
-  return v ? JSON.parse(v) : null;
-}
-
-async function write(
-  sid: string,
-  ns: string,
-  val: any,
-  ttlSec = 60 * 60 * 24
-) {
-  await redis.set(memKey(sid, ns), JSON.stringify(val), "EX", ttlSec);
-}
-
-/* 
-  A0 PLANNER 
+   A0 POLICY PLANNER
  */
 
 type PolicyPlan = {
@@ -42,6 +22,7 @@ const Planner = new Agent({
   model: "gpt-4o-mini",
   instructions: `
 You are A0 (controller). You never answer questions.
+You only decide policy.
 
 Return STRICT JSON:
 
@@ -52,15 +33,15 @@ Return STRICT JSON:
 }
 
 Rules:
-- If the user says "based only on this paper" → main_only, allow_external_retrieval=false
-- If the user says "use citations / references" → allow_citations, allow_external_retrieval=true
+- If a paper is provided AND user does NOT ask for citations/references → main_only, allow_external_retrieval=false
+- If user explicitly asks for citations/references/related work → allow_citations, allow_external_retrieval=true
 - If no paper is provided → allow_external_retrieval=true
 - Default format: markdown
 `,
 });
 
 /* 
-  A0 CONTROLLER
+   A0 CONTROLLER
  */
 
 export async function runA0(input: {
@@ -68,7 +49,7 @@ export async function runA0(input: {
   userInput: string;
   expertise?: "novice" | "intermediate" | "expert";
   format?: "markdown" | "latex" | "html";
-  sources?: string[]; // PDF paths
+  sources?: string[];
 }) {
   const {
     sessionId,
@@ -78,22 +59,27 @@ export async function runA0(input: {
     sources = [],
   } = input;
 
-  /* POLICY PLAN */
+  const mem = new GlobalMemory(sessionId);
+
+  /* ---------- POLICY PLAN ---------- */
   const planRes = await run(
     Planner,
     JSON.stringify({ userInput, sources, format })
   );
   const plan: PolicyPlan = JSON.parse(planRes.finalOutput);
 
-  /* STORE MAIN PAPER */
+  /* ---------- STORE MAIN PAPER ---------- */
   if (sources.length > 0) {
-    await write(sessionId, "main_paper", {
+    await mem.write(Namespaces.main_paper, {
       path: sources[0],
       uploaded_at: new Date().toISOString(),
     });
   }
 
-  /* RETRIEVAL DECISION */
+  /* ---------- LOAD FEEDBACK MEMORY (OPTIONAL) ---------- */
+  const blacklist = (await mem.read<string[]>(Namespaces.blacklist)) ?? [];
+
+  /* ---------- RETRIEVAL DECISION ---------- */
   let evidence: Evidence[] = [];
 
   if (plan.allow_external_retrieval) {
@@ -104,7 +90,7 @@ export async function runA0(input: {
         query: userInput,
         topN: 40,
         topK: 8,
-        penalties: { blacklist: [] },
+        penalties: { blacklist },
       },
     };
 
@@ -112,14 +98,14 @@ export async function runA0(input: {
     evidence = a1Out.evidence ?? [];
   }
 
-  /* HARD POLICY ENFORCEMENT */
+  /* ---------- HARD POLICY ENFORCEMENT ---------- */
   if (plan.mode === "main_only" && evidence.length > 0) {
     throw new Error(
       "A0 policy violation: external evidence retrieved in main_only mode"
     );
   }
 
-  /* REASONING (A2) */
+  /* ---------- REASONING (A2) ---------- */
   const a2Task: A2Task = {
     agent: "A2",
     action: "reason",
@@ -133,8 +119,8 @@ export async function runA0(input: {
 
   const a2Result: A2Result = await runA2(a2Task);
 
-  /* SAVE WORKING MEMORY */
-  await write(sessionId, "working", {
+  /* ---------- SAVE WORKING MEMORY ---------- */
+  await mem.write(Namespaces.working, {
     query: userInput,
     mode: plan.mode,
     external_evidence_used: plan.allow_external_retrieval,
