@@ -3,12 +3,26 @@ import * as path from "path";
 import axios from "axios";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+const pdfParse = require("pdf-parse");
 
 dotenv.config();
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy initialization of OpenAI client to avoid errors if API key is missing
+let openai: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (!openai) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "OPENAI_API_KEY is required. Please set it in .env file or environment variables.\n" +
+        "Create a .env file in the project root with: OPENAI_API_KEY=your_key_here"
+      );
+    }
+    openai = new OpenAI({ apiKey });
+  }
+  return openai;
+}
 
 // TYPES (matching A0's expectations)
 export interface Citation {
@@ -17,6 +31,15 @@ export interface Citation {
   year: string;
   journal: string;
   doi: string;
+}
+
+export interface TextLocation {
+  paragraph: number;
+  line: number;
+  start_sentence: string;
+  end_sentence?: string;
+  char_start?: number;
+  char_end?: number;
 }
 
 export interface Evidence {
@@ -28,6 +51,9 @@ export interface Evidence {
   arxiv_id?: string;
   text?: string;
   source_type?: "pdf" | "abstract" | "metadata_only";
+  is_main_paper?: boolean; // True if this is the user's uploaded paper
+  locations?: TextLocation[]; // Location info for text snippets from main paper
+  pdf_path?: string; // Path to the main paper PDF
 }
 
 export type A1Task =
@@ -46,6 +72,8 @@ export interface A1Result {
 class AgentState {
   private citations: Citation[] = [];
   private evidence: Evidence[] = [];
+  private mainPaperPath: string | null = null;
+  private mainPaperText: ExtractedTextWithLocations | null = null;
 
   setCitations(citations: Citation[]) {
     this.citations = citations;
@@ -67,13 +95,116 @@ class AgentState {
     this.evidence = [];
   }
 
+  setMainPaper(path: string, text: ExtractedTextWithLocations) {
+    this.mainPaperPath = path;
+    this.mainPaperText = text;
+  }
+
+  getMainPaper(): { path: string | null; text: ExtractedTextWithLocations | null } {
+    return { path: this.mainPaperPath, text: this.mainPaperText };
+  }
+
   reset() {
     this.citations = [];
     this.evidence = [];
+    this.mainPaperPath = null;
+    this.mainPaperText = null;
   }
 }
 
 const agentState = new AgentState();
+
+// PDF TEXT EXTRACTION WITH LOCATION TRACKING
+export interface ExtractedTextWithLocations {
+  fullText: string;
+  paragraphs: Array<{
+    paragraphNumber: number;
+    text: string;
+    lines: Array<{
+      lineNumber: number;
+      text: string;
+      charStart: number;
+      charEnd: number;
+    }>;
+  }>;
+}
+
+async function extractTextWithLocations(pdfPath: string): Promise<ExtractedTextWithLocations> {
+  try {
+    const dataBuffer = fs.readFileSync(pdfPath);
+    const data = await pdfParse(dataBuffer);
+    
+    const fullText = data.text;
+    const paragraphs: ExtractedTextWithLocations["paragraphs"] = [];
+    
+    // Split by double newlines (paragraph breaks)
+    const paragraphTexts = fullText.split(/\n\s*\n/).filter((p: string) => p.trim().length > 0);
+    
+    let charOffset = 0;
+    
+    paragraphTexts.forEach((paraText: string, paraIdx: number) => {
+      const lines = paraText.split(/\n/).filter((l: string) => l.trim().length > 0);
+      const paragraphLines: ExtractedTextWithLocations["paragraphs"][0]["lines"] = [];
+      
+      lines.forEach((lineText: string, lineIdx: number) => {
+        const charStart = fullText.indexOf(lineText, charOffset);
+        const charEnd = charStart + lineText.length;
+        charOffset = charEnd;
+        
+        paragraphLines.push({
+          lineNumber: lineIdx + 1,
+          text: lineText.trim(),
+          charStart,
+          charEnd,
+        });
+      });
+      
+      if (paragraphLines.length > 0) {
+        paragraphs.push({
+          paragraphNumber: paraIdx + 1,
+          text: paraText.trim(),
+          lines: paragraphLines,
+        });
+      }
+    });
+    
+    return { fullText, paragraphs };
+  } catch (error) {
+    console.error("[A1] Error extracting text from PDF:", error);
+    return { fullText: "", paragraphs: [] };
+  }
+}
+
+// Find text locations in the main paper
+function findTextLocations(
+  searchText: string,
+  extracted: ExtractedTextWithLocations
+): TextLocation[] {
+  const locations: TextLocation[] = [];
+  const searchLower = searchText.toLowerCase();
+  
+  extracted.paragraphs.forEach((para) => {
+    para.lines.forEach((line) => {
+      if (line.text.toLowerCase().includes(searchLower)) {
+        // Find the sentence containing this text
+        const sentences = line.text.match(/[^.!?]+[.!?]+/g) || [line.text];
+        const matchingSentence = sentences.find(s => 
+          s.toLowerCase().includes(searchLower)
+        ) || sentences[0];
+        
+        locations.push({
+          paragraph: para.paragraphNumber,
+          line: line.lineNumber,
+          start_sentence: matchingSentence.trim(),
+          char_start: line.charStart,
+          char_end: line.charEnd,
+        });
+      }
+    });
+  });
+  
+  return locations;
+}
 
 // TOOL IMPLEMENTATIONS
 async function extractReferencesGrobid(pdfPath: string): Promise<string[]> {
@@ -122,7 +253,7 @@ CITATIONS:
 ${blob}`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model: "gpt-4o",
       messages: [{ role: "user", content: msg }],
       temperature: 0,
@@ -356,6 +487,40 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "extract_text_from_main_paper",
+      description: "Extract text from the main uploaded paper with paragraph and line tracking.",
+      parameters: {
+        type: "object",
+        properties: {
+          pdf_path: {
+            type: "string",
+            description: "Path to the main paper PDF",
+          },
+        },
+        required: ["pdf_path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_main_paper_text",
+      description: "Search for text in the main paper and get location details (paragraph, line, sentence).",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Text to search for in the main paper",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 // TOOL EXECUTION
@@ -474,6 +639,53 @@ async function executeFunction(
       };
     }
 
+    case "extract_text_from_main_paper": {
+      const { pdf_path } = args;
+      if (!fs.existsSync(pdf_path)) {
+        return { success: false, error: `PDF not found: ${pdf_path}` };
+      }
+
+      const extracted = await extractTextWithLocations(pdf_path);
+      agentState.setMainPaper(pdf_path, extracted);
+
+      return {
+        success: true,
+        paragraphs_count: extracted.paragraphs.length,
+        total_lines: extracted.paragraphs.reduce((sum, p) => sum + p.lines.length, 0),
+      };
+    }
+
+    case "search_main_paper_text": {
+      const { query } = args;
+      const mainPaper = agentState.getMainPaper();
+
+      if (!mainPaper.text) {
+        return {
+          success: false,
+          error: "Main paper text not extracted. Call extract_text_from_main_paper first.",
+        };
+      }
+
+      const locations = findTextLocations(query, mainPaper.text);
+      const snippets = locations.map(loc => {
+        const para = mainPaper.text!.paragraphs.find(p => p.paragraphNumber === loc.paragraph);
+        const line = para?.lines.find(l => l.lineNumber === loc.line);
+        return {
+          paragraph: loc.paragraph,
+          line: loc.line,
+          start_sentence: loc.start_sentence,
+          full_line: line?.text || "",
+        };
+      });
+
+      return {
+        success: true,
+        locations: locations,
+        snippets: snippets,
+        count: locations.length,
+      };
+    }
+
     default:
       return { success: false, error: `Unknown function: ${name}` };
   }
@@ -515,7 +727,7 @@ Complete the task systematically.`,
     iteration++;
     console.log(`\n[A1 ITERATION ${iteration}/${maxIterations}]`);
 
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model: "gpt-4o",
       messages,
       tools,
@@ -535,6 +747,7 @@ Complete the task systematically.`,
     }
 
     for (const toolCall of message.tool_calls) {
+      if (toolCall.type !== "function") continue;
       const functionName = toolCall.function.name;
       const functionArgs = JSON.parse(toolCall.function.arguments);
 
@@ -565,7 +778,7 @@ export async function run(task: A1Task): Promise<A1Result> {
     agentState.reset();
 
     if (task.action === "ingest_parse") {
-      // Extract citations from PDFs
+      // Extract citations from PDFs and extract text from main paper
       const sources = task.inputs.sources || [];
       
       if (sources.length === 0) {
@@ -576,6 +789,14 @@ export async function run(task: A1Task): Promise<A1Result> {
         };
       }
 
+      // Assume first source is the main paper
+      const mainPaperPath = sources[0];
+      
+      // Extract text from main paper with location tracking
+      const extracted = await extractTextWithLocations(mainPaperPath);
+      agentState.setMainPaper(mainPaperPath, extracted);
+      
+      // Extract citations
       const taskStr = `Extract all citations from these PDF files: ${sources.join(", ")}. Store them in memory.`;
       await runAgent(taskStr);
 
@@ -586,9 +807,37 @@ export async function run(task: A1Task): Promise<A1Result> {
       };
 
     } else if (task.action === "retrieve") {
-      // Build evidence from citations
+      // Build evidence from citations and search main paper
       const { query, topN = 40, topK = 8, penalties = {} } = task.inputs;
       const blacklist = penalties?.blacklist || [];
+
+      // First, search the main paper for relevant text
+      const mainPaper = agentState.getMainPaper();
+      if (mainPaper.text && mainPaper.path) {
+        const locations = findTextLocations(query, mainPaper.text);
+        if (locations.length > 0) {
+          // Get text snippets from main paper
+          const snippets = locations.map(loc => {
+            const para = mainPaper.text!.paragraphs.find(p => p.paragraphNumber === loc.paragraph);
+            const line = para?.lines.find(l => l.lineNumber === loc.line);
+            return line?.text || "";
+          }).join(" ");
+
+          // Add main paper as evidence with location info
+          const mainPaperEvidence: Evidence = {
+            title: "Main Paper",
+            authors: [],
+            year: "",
+            journal: "",
+            text: snippets,
+            source_type: "pdf",
+            is_main_paper: true,
+            locations: locations,
+            pdf_path: mainPaper.path,
+          };
+          agentState.addEvidence(mainPaperEvidence);
+        }
+      }
 
       const taskStr = `Build a knowledge base about "${query}".
 
@@ -599,14 +848,23 @@ Steps:
    - Download PDF or get abstract
    - Add to evidence
 3. Skip blacklisted DOIs: ${JSON.stringify(blacklist)}
-4. Limit to ${topK} evidence items`;
+4. Limit to ${topK} evidence items (excluding main paper)`;
 
       await runAgent(taskStr);
+
+      // Ensure main paper evidence is included
+      const allEvidence = agentState.getEvidence();
+      const mainPaperEvidence = allEvidence.find(e => e.is_main_paper);
+      const otherEvidence = allEvidence.filter(e => !e.is_main_paper).slice(0, topK - (mainPaperEvidence ? 1 : 0));
+      
+      const finalEvidence = mainPaperEvidence 
+        ? [mainPaperEvidence, ...otherEvidence]
+        : otherEvidence;
 
       return {
         agent: "A1",
         status: "success",
-        evidence: agentState.getEvidence().slice(0, topK),
+        evidence: finalEvidence,
       };
 
     } else {

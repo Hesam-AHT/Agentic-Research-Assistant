@@ -1,7 +1,10 @@
-import { StateGraph, END } from "@langchain/langgraph";
+import { StateGraph, END, Annotation } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
-import { GlobalMemory } from "../memory/GlobalMemory";
+import dotenv from "dotenv";
+import { GlobalMemory } from "../../memory/GlobalMemory";
+
+dotenv.config();
 
 // Agents
 
@@ -55,6 +58,7 @@ export type A0State = {
   // control
   brain?: Brain;
   decomposition?: Decomp;
+  keywords?: string[];
   plan?: TodoTask[];
   attempts?: number;
 
@@ -67,12 +71,14 @@ export type A0State = {
   citations?: any[];
 
   trace?: string[];
-};code
+};
 
 // LLM small brain (maybe switch to deepsearch from openai????)
 
 const brainLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
 const decompLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
+const keywordLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
+const feedbackLLM = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 });
 
 async function classifyBrain(input: string, profile: any): Promise<Brain> {
   const prompt = `Classify the request. JSON only.
@@ -99,6 +105,28 @@ Request:
       mode: "pipeline",
       output_format: "markdown",
     });
+  }
+}
+
+async function extractKeywords(input: string): Promise<string[]> {
+  const prompt = `Extract 3-7 key terms/keywords from the following user query. Return ONLY a JSON array of strings.
+
+Example: ["transformer", "attention mechanism", "neural networks"]
+
+Query:
+"""${input}"""`;
+
+  try {
+    const res = await keywordLLM.invoke(prompt);
+    const parsed = JSON.parse(String(res.content));
+    return Array.isArray(parsed) ? parsed : [input];
+  } catch {
+    // Fallback: simple keyword extraction
+    return input
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(w => w.length > 3)
+      .slice(0, 7);
   }
 }
 
@@ -236,6 +264,11 @@ async function brainNode(state: A0State) {
   return { brain, trace: [...state.trace!, "BRAIN"] };
 }
 
+async function keywordNode(state: A0State) {
+  const keywords = await extractKeywords(state.userInput);
+  return { keywords, trace: [...state.trace!, "KEYWORDS"] };
+}
+
 async function decomposeNode(state: A0State) {
   const decomposition = await decomposeQuery(state.userInput, state.brain!.task_type);
   return { decomposition, trace: [...state.trace!, "DECOMPOSE"] };
@@ -248,8 +281,27 @@ function planNode(state: A0State) {
 async function dispatchNode(state: A0State, cfg: { agents: AgentRegistry }) {
   const results = await dispatch(state, cfg.agents);
   const reason = results["reason"] ?? {};
+  
+  // Collect all evidence for feedback routing
+  const evidence: any[] = [];
+  for (const k in results) {
+    if (k.startsWith("retrieve_")) {
+      evidence.push(...(results[k]?.evidence ?? []));
+    }
+  }
+  
+  // Store evidence in memory for feedback routing
+  const mem = new GlobalMemory(state.sessionId);
+  await mem.write("working", {
+    last_query: state.userInput,
+    last_answer: reason.answer ?? "",
+    last_citations: reason.citations ?? [],
+    last_evidence: evidence,
+  }, 60 * 60 * 24 * 7);
+  
   return {
     results,
+    evidence,
     answer: reason.answer ?? "",
     citations: reason.citations ?? [],
     trace: [...state.trace!, "DISPATCH"],
@@ -266,21 +318,40 @@ async function exitNode(state: A0State) {
   return { trace: [...state.trace!, "EXIT"] };
 }
 
-/*Build Graphs 
-//should be reconsidered after finishing the prototype 
+// Build Graphs
+export function buildA0AnswerGraph(agents: AgentRegistry) {
+  // Define state annotation
+  const stateAnnotation = Annotation.Root({
+    sessionId: Annotation<string>(),
+    userInput: Annotation<string>(),
+    sources: Annotation<string[]>(),
+    profile: Annotation<any>(),
+    blacklist: Annotation<string[]>(),
+    brain: Annotation<any>(),
+    decomposition: Annotation<any>(),
+    keywords: Annotation<string[]>(),
+    plan: Annotation<any[]>(),
+    attempts: Annotation<number>(),
+    results: Annotation<Record<string, any>>(),
+    evidence: Annotation<any[]>(),
+    answer: Annotation<string>(),
+    citations: Annotation<any[]>(),
+    trace: Annotation<string[]>(),
+  });
 
-export function buildA0AnswerGraph() {
-  const g = new StateGraph<A0State>()
+  const g = new StateGraph(stateAnnotation)
     .addNode("entry", entryNode)
     .addNode("brain", brainNode)
+    .addNode("keywords", keywordNode)
     .addNode("decompose", decomposeNode)
     .addNode("plan", planNode)
-    .addNode("dispatch", dispatchNode as any)
+    .addNode("dispatch", (state: A0State) => dispatchNode(state, { agents }))
     .addNode("exit", exitNode);
 
   g.setEntryPoint("entry");
   g.addEdge("entry", "brain");
-  g.addEdge("brain", "decompose");
+  g.addEdge("brain", "keywords");
+  g.addEdge("keywords", "decompose");
   g.addEdge("decompose", "plan");
   g.addEdge("plan", "dispatch");
   g.addEdge("dispatch", "exit");
@@ -288,8 +359,6 @@ export function buildA0AnswerGraph() {
 
   return g.compile();
 }
-
-*/
 
 // Feedback
 
@@ -300,23 +369,94 @@ export type FeedbackState = {
     helpful?: boolean;
     wrong_citations?: { doi?: string }[];
     verbosity?: "shorter" | "longer";
+    needs_more_info?: boolean;
+    answer_wrong?: boolean;
+    unclear?: boolean;
   };
+  lastQuery?: string;
+  lastAnswer?: string;
+  lastEvidence?: any[];
 };
+
+type FeedbackDecision = {
+  route_to: "A1" | "A2" | "both" | "none";
+  reason: string;
+  new_query?: string;
+};
+
+async function analyzeFeedback(state: FeedbackState): Promise<FeedbackDecision> {
+  const feedback = state.feedback;
+  
+  // Simple rule-based routing (can be enhanced with LLM)
+  if (feedback.wrong_citations && feedback.wrong_citations.length > 0) {
+    return {
+      route_to: "A1",
+      reason: "Wrong citations detected, need to rebuild knowledge base",
+    };
+  }
+
+  if (feedback.needs_more_info || feedback.unclear) {
+    return {
+      route_to: "A1",
+      reason: "User needs more information, search for additional evidence",
+      new_query: state.lastQuery,
+    };
+  }
+
+  if (feedback.answer_wrong || (!feedback.helpful && !feedback.verbosity)) {
+    return {
+      route_to: "A2",
+      reason: "Answer quality issue, need better reasoning",
+    };
+  }
+
+  if (feedback.verbosity) {
+    return {
+      route_to: "A2",
+      reason: "User wants different verbosity level",
+    };
+  }
+
+  return {
+    route_to: "none",
+    reason: "Feedback processed, no action needed",
+  };
+}
 
 async function feedbackNode(state: FeedbackState) {
   const mem = new GlobalMemory(state.sessionId);
   const blacklist = (await mem.read<string[]>("blacklist")) ?? [];
+  
+  // Update blacklist
   for (const w of state.feedback.wrong_citations ?? []) {
     if (w.doi && !blacklist.includes(w.doi)) blacklist.push(w.doi);
   }
   await mem.write("blacklist", blacklist);
   await mem.append("feedback_log", state.feedback);
-  return {};
+  
+  // Analyze feedback and decide routing
+  const decision = await analyzeFeedback(state);
+  
+  return {
+    decision,
+    trace: ["FEEDBACK_PROCESSED"],
+  };
 }
 
 export function buildA0FeedbackGraph() {
-  const g = new StateGraph<FeedbackState>().addNode("ingest", feedbackNode);
-  g.setEntryPoint("ingest");
-  g.addEdge("ingest", END);
+  // Define feedback state annotation
+  const feedbackStateAnnotation = Annotation.Root({
+    sessionId: Annotation<string>(),
+    feedback: Annotation<any>(),
+    lastQuery: Annotation<string>(),
+    lastAnswer: Annotation<string>(),
+    lastEvidence: Annotation<any[]>(),
+    decision: Annotation<any>(),
+    trace: Annotation<string[]>(),
+  });
+
+  const g = new StateGraph(feedbackStateAnnotation).addNode("process", feedbackNode);
+  g.setEntryPoint("process");
+  g.addEdge("process", END);
   return g.compile();
 }

@@ -3,11 +3,33 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy initialization of OpenAI client to avoid errors if API key is missing
+let openai: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (!openai) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "OPENAI_API_KEY is required. Please set it in .env file or environment variables.\n" +
+        "Create a .env file in the project root with: OPENAI_API_KEY=your_key_here"
+      );
+    }
+    openai = new OpenAI({ apiKey });
+  }
+  return openai;
+}
 
 // TYPES (matching A0's expectations)
+export interface TextLocation {
+  paragraph: number;
+  line: number;
+  start_sentence: string;
+  end_sentence?: string;
+  char_start?: number;
+  char_end?: number;
+}
+
 export interface Evidence {
   doi?: string;
   title: string;
@@ -17,6 +39,9 @@ export interface Evidence {
   arxiv_id?: string;
   text?: string;
   source_type?: "pdf" | "abstract" | "metadata_only";
+  is_main_paper?: boolean;
+  locations?: TextLocation[];
+  pdf_path?: string;
 }
 
 export interface A2Task {
@@ -274,6 +299,16 @@ async function executeFunction(
               formatted = `[${displayIdx + 1}] ${e.title}. ${authors} (${e.year}).`;
           }
 
+          // Add location details for main paper
+          let locationDetails = null;
+          if (e.is_main_paper && e.locations && e.locations.length > 0) {
+            locationDetails = e.locations.map(loc => ({
+              paragraph: loc.paragraph,
+              line: loc.line,
+              start_sentence: loc.start_sentence,
+            }));
+          }
+
           return {
             index: displayIdx + 1,
             formatted,
@@ -283,6 +318,9 @@ async function executeFunction(
             doi: e.doi,
             arxiv_id: e.arxiv_id,
             journal: e.journal,
+            is_main_paper: e.is_main_paper || false,
+            locations: locationDetails,
+            pdf_path: e.pdf_path,
           };
         });
 
@@ -353,7 +391,7 @@ When done, synthesize the answer and format citations.`,
     iteration++;
     console.log(`\n[A2 ITERATION ${iteration}/${maxIterations}]`);
 
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model: "gpt-4o",
       messages,
       tools,
@@ -376,6 +414,7 @@ When done, synthesize the answer and format citations.`,
 
     // Execute tool calls
     for (const toolCall of message.tool_calls) {
+      if (toolCall.type !== "function") continue;
       const functionName = toolCall.function.name;
       const functionArgs = JSON.parse(toolCall.function.arguments);
 
