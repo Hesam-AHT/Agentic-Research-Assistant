@@ -10,13 +10,14 @@
 //   A1: src/agents/a1/a1.ts
 //   A2: src/agents/a2/a2.ts
 //   Memory: src/memory/GlobalMemory.ts
+import "dotenv/config";
 
 import { Agent, run, setDefaultOpenAIKey } from "@openai/agents";
 
-import { run as runA1, type A1Task, type Evidence } from "../agents/a1/a1";
-import { run as runA2, type A2Task, type A2Result } from "../agents/a2/a2";
+import { run as runA1, type A1Task, type Evidence } from "../a1/a1";
+import { run as runA2, type A2Task, type A2Result } from "../a2/a2";
 
-import { GlobalMemory, Namespaces } from "../memory/GlobalMemory";
+import { GlobalMemory, Namespaces } from "../../memory/GlobalMemory";
 
 setDefaultOpenAIKey(process.env.OPENAI_API_KEY!);
 
@@ -76,10 +77,17 @@ export async function runA0(input: {
 
   /* ---------- POLICY PLAN ---------- */
   const planRes = await run(
-    Planner,
-    JSON.stringify({ userInput, sources, format })
-  );
-  const plan: PolicyPlan = JSON.parse(planRes.finalOutput);
+  Planner,
+  JSON.stringify({ userInput, sources, format })
+);
+
+const raw = planRes.finalOutput;
+if (!raw) {
+  throw new Error("Planner returned empty finalOutput");
+}
+
+const plan: PolicyPlan = JSON.parse(raw);
+
 
   /* ---------- STORE MAIN PAPER ---------- */
   if (sources.length > 0) {
@@ -143,4 +151,23 @@ export async function runA0(input: {
   });
 
   return a2Result;
+}
+
+
+/* sanity test */
+if (require.main === module) {
+  runA0({
+    sessionId: "test-session",
+    userInput: "Summarize this paper",
+    sources: ["dummy.pdf"],
+  })
+    .then((res) => {
+      console.log("A0 RESULT:");
+      console.log(res);
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
 }

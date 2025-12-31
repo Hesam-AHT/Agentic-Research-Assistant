@@ -5,7 +5,7 @@ import * as path from "path";
 import * as fs from "fs";
 import axios from "axios";
 import dotenv from "dotenv";
-import { buildA0AnswerGraph, buildA0FeedbackGraph, AgentRegistry, A0State, FeedbackState } from "./agents/a0/a0";
+import { runA0 } from "./agents/a0/a0";
 import { run as runA1 } from "./agents/a1/a1";
 import { run as runA2 } from "./agents/a2/a2";
 import { GlobalMemory } from "./memory/GlobalMemory";
