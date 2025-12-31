@@ -30,6 +30,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static files from public directory (CSS, JS, images, etc.)
+app.use(express.static(path.join(__dirname, "../public")));
+
 // Configure multer for file uploads (single file only)
 const upload = multer({
   dest: "uploads/",
@@ -48,15 +51,7 @@ if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads", { recursive: true });
 }
 
-// Agent registry
-const agents: AgentRegistry = {
-  A1: { run: runA1 },
-  A2: { run: runA2 },
-};
-
-// Build graphs
-const answerGraph = buildA0AnswerGraph(agents);
-const feedbackGraph = buildA0FeedbackGraph();
+// Note: A0 now uses runA0 function directly instead of graph-based approach
 
 // Helper to generate session ID
 function generateSessionId(): string {
@@ -146,22 +141,18 @@ app.post("/api/query", upload.single("file"), async (req, res) => {
       });
     }
 
-    // Build initial state
-    const initialState: A0State = {
-      sessionId: session,
-      userInput: query,
-      sources: [sourcePath],
-      trace: [],
-    };
-
     console.log(`\n[Server] Processing query for session ${session}`);
     console.log(`Query: ${query}`);
     console.log(`Source: ${sourcePath}`);
 
-    // Run the graph
-    const result: any = await answerGraph.invoke(initialState);
+    // Run A0 with the new function-based approach
+    const result: any = await runA0({
+      sessionId: session,
+      userInput: query,
+      sources: [sourcePath],
+    });
 
-    // Extract highlighted sections from main paper
+    // Extract highlighted sections from main paper if available
     const mainPaperEvidence = result.evidence?.find((e: any) => e.is_main_paper);
     const highlightedSections = mainPaperEvidence?.locations || [];
 
@@ -184,14 +175,14 @@ app.post("/api/query", upload.single("file"), async (req, res) => {
     res.json({
       sessionId: session,
       answer: result.answer || "No answer generated",
-      citations: formattedCitations,
+      citations: formattedCitations || result.citations || [],
       highlightedSections: highlightedSections.map((loc: any) => ({
         paragraph: loc.paragraph,
         line: loc.line,
         start_sentence: loc.start_sentence,
         text: loc.start_sentence,
       })),
-      trace: result.trace || [],
+      confidence: result.confidence,
       evidenceCount: result.evidence?.length || 0,
       mainPaperPath: mainPaperEvidence?.pdf_path || sourcePath,
     });
@@ -220,22 +211,25 @@ app.post("/api/feedback", async (req, res) => {
     console.log(`\n[Server] Processing feedback for session ${sessionId}`);
     console.log(`Feedback:`, feedback);
 
-    // Build feedback state
-    const feedbackState: FeedbackState = {
-      sessionId,
-      feedback,
-      lastQuery,
-      lastAnswer,
-    };
+    // Process feedback - simplified approach
+    const mem = new GlobalMemory(sessionId);
+    const blacklist = (await mem.read<string[]>("blacklist")) ?? [];
+    
+    // Update blacklist
+    for (const w of feedback.wrong_citations ?? []) {
+      if (w.doi && !blacklist.includes(w.doi)) blacklist.push(w.doi);
+    }
+    await mem.write("blacklist", blacklist);
+    await mem.append("feedback_log", feedback);
+    
+    // Simple routing logic
+    type DecisionType = { route_to: "A1" | "A2" | "none"; reason: string };
+    let nextAction: any = null;
+    let decision: DecisionType = { route_to: "none", reason: "Feedback processed" };
 
-    // Process feedback
-    const result: any = await feedbackGraph.invoke(feedbackState);
-
-    const decision = result.decision;
-    let nextAction = null;
-
-    // Based on feedback decision, route to appropriate agent
-    if (decision.route_to === "A1") {
+    // Based on feedback, route to appropriate agent
+    if (feedback.wrong_citations && feedback.wrong_citations.length > 0) {
+      decision = { route_to: "A1", reason: "Wrong citations detected, need to rebuild knowledge base" };
       // Need new knowledge base
       console.log("[Server] Routing to A1 for new knowledge base");
       
@@ -247,28 +241,49 @@ app.post("/api/feedback", async (req, res) => {
         agent: "A1" as const,
         action: "retrieve" as const,
         inputs: {
-          query: decision.new_query || lastQuery || "",
+          query: lastQuery || "",
           topN: 40,
           topK: 8,
           penalties: { blacklist: blacklist },
         },
       };
 
-      const a1Result = await agents.A1.run(a1Task);
+      const a1Result = await runA1(a1Task);
       
       nextAction = {
         agent: "A1",
         result: a1Result,
         message: "New knowledge base created. Would you like a new answer?",
       };
-    } else if (decision.route_to === "A2") {
+    } else if (feedback.needs_more_info || feedback.unclear) {
+      decision = { route_to: "A1", reason: "User needs more information, search for additional evidence" };
+      
+      const a1Task = {
+        agent: "A1" as const,
+        action: "retrieve" as const,
+        inputs: {
+          query: lastQuery || "",
+          topN: 40,
+          topK: 8,
+          penalties: { blacklist: blacklist },
+        },
+      };
+
+      const a1Result = await runA1(a1Task);
+      
+      nextAction = {
+        agent: "A1",
+        result: a1Result,
+        message: "New knowledge base created. Would you like a new answer?",
+      };
+    } else if (feedback.answer_wrong || (!feedback.helpful && !feedback.verbosity)) {
+      decision = { route_to: "A2", reason: "Answer quality issue, need better reasoning" };
       // Need new answer with existing evidence
       console.log("[Server] Routing to A2 for new answer");
       
       // Get last evidence from memory or use empty
-      const mem = new GlobalMemory(sessionId);
       const lastWorking = await mem.read("working");
-      const evidence = lastWorking?.last_evidence || [];
+      const evidence = (lastWorking as any)?.evidence || [];
       
       // Get blacklist for penalties
       const blacklist = (await mem.read<string[]>("blacklist")) || [];
@@ -290,7 +305,7 @@ app.post("/api/feedback", async (req, res) => {
         },
       };
 
-      const a2Result = await agents.A2.run(a2Task);
+      const a2Result = await runA2(a2Task);
       
       nextAction = {
         agent: "A2",
@@ -303,7 +318,6 @@ app.post("/api/feedback", async (req, res) => {
       sessionId,
       decision: decision.reason,
       nextAction,
-      trace: result.trace || [],
     });
   } catch (error) {
     console.error("[Server] Error processing feedback:", error);
@@ -314,8 +328,13 @@ app.post("/api/feedback", async (req, res) => {
   }
 });
 
-// GET / - Root endpoint with API information and examples
+// GET / - Serve index.html if it exists, otherwise show API info
 app.get("/", (req, res) => {
+  const indexPath = path.join(__dirname, "../public/index.html");
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  // Fallback to API info if no index.html
   res.json({
     name: "Agentic Research Assistant API",
     version: "1.0.0",

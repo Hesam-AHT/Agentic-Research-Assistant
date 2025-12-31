@@ -13,6 +13,7 @@
     "@langchain/langgraph": "^1.0.5",
     "@langchain/openai": "^1.2.0",
     "@openai/agents": "^0.3.7",
+    "@openai/agents-openai": "^0.3.7",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
