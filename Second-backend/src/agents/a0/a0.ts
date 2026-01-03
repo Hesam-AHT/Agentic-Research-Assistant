@@ -48,8 +48,8 @@ Return STRICT JSON:
 }
 
 Rules:
-- If a paper is provided AND user does NOT ask for citations/references → main_only, allow_external_retrieval=false
-- If user explicitly asks for citations/references/related work → allow_citations, allow_external_retrieval=true
+- If a paper is provided AND user does NOT ask for citations/references/related work/comparisons → main_only, allow_external_retrieval=false
+- If user mentions "references", "citations", "related work", "comparison", "compare", or specific paper names/keywords → allow_citations, allow_external_retrieval=true
 - If no paper is provided → allow_external_retrieval=true
 - Default format: markdown
 `,

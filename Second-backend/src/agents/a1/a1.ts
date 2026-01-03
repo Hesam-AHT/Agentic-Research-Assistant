@@ -728,21 +728,20 @@ async function executeFunction(
       const allCitations = agentState.getCitations();
 
       // CHANGED BY DATE: 2026-01-03 - Robust multi-keyword filtering
-      // Instead of literal match, split into keywords and match any
       const stopWords = new Set(["and", "the", "a", "an", "of", "in", "on", "with", "between", "comparison", "compare", "architecture", "model", "paper", "is", "for", "to", "at", "by", "that", "this", "which", "are", "it"]);
       const keywords = keyword.toLowerCase()
         .split(/[\s,.;:?!()]+/)
-        .filter(word => word.length > 2 && !stopWords.has(word));
+        .filter((word: string) => word.length > 2 && !stopWords.has(word));
 
       console.log(`[A1]  Extracted keywords: ${JSON.stringify(keywords)}`);
 
-      const filtered = allCitations.filter((c, index) => {
-        const titleLower = c.title.toLowerCase();
-        const authorsLower = c.authors.map(a => a.toLowerCase());
+      const filtered = allCitations.filter((c: any, index: number) => {
+        const titleLower = (c.title || "").toLowerCase();
+        const authorsLower = (c.authors || []).map((a: string) => a.toLowerCase());
 
-        const isMatch = keywords.some(kw =>
+        const isMatch = keywords.some((kw: string) =>
           titleLower.includes(kw) ||
-          authorsLower.some(author => author.includes(kw))
+          authorsLower.some((author: string) => author.includes(kw))
         );
 
         if (isMatch) {
@@ -860,14 +859,37 @@ async function executeFunction(
 
     // CHANGED BY DATE: 2026-01-03 - Combined tool that reads PDF and adds to evidence in one step
     case "read_and_add_to_evidence": {
-      const { pdf_path, citation, arxiv_id } = args;
+      let { pdf_path, citation, arxiv_id } = args;
+
+      // CHANGED BY DATE: 2026-01-03 - Auto-lookup citation if missing or incomplete
+      if (!citation || !citation.title || citation.title === "NO TITLE") {
+        console.log(`[A1] read_and_add_to_evidence: Missing citation object, attempting robust lookup...`);
+        const allCites = agentState.getCitations();
+
+        // Normalize strings for robust matching (remove all non-alphanumeric)
+        const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const pathNorm = normalize(pdf_path);
+
+        const lookup = allCites.find((c: any) => {
+          if (!c.title) return false;
+          const titleNorm = normalize(c.title);
+
+          return (arxiv_id && c.doi?.includes(arxiv_id)) ||
+            (titleNorm.length > 10 && pathNorm.includes(titleNorm.substring(0, 30)));
+        });
+
+        if (lookup) {
+          console.log(`[A1]   Lookup success! Found: "${lookup.title}"`);
+          citation = lookup;
+        }
+      }
 
       console.log(`[A1] read_and_add_to_evidence: "${citation?.title || 'NO TITLE'}"`);
       console.log(`[A1]   PDF: ${pdf_path}`);
 
       if (!citation || !citation.title) {
         console.error(`[A1]   ERROR: Citation missing or no title!`);
-        return { success: false, error: "Citation object with title is required" };
+        return { success: false, error: "Citation object with title is required. Ensure you pass the object from filter_citations." };
       }
 
       if (!fs.existsSync(pdf_path)) {
