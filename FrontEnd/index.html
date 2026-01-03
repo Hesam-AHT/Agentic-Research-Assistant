@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RefHunters - PDF Chat System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body data-view="welcome">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script> 
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+    </script>
+    
+    <div id="app-container">
+        <div id="welcome-page" class="view active-view">
+            <div class="welcome-content">
+                <h1>Benvenuto!</h1>
+                <div class="chat-input-container">
+                    <input type="text" id="welcome-input" placeholder="ASK ABOUT..." class="main-input">
+                    <button type="button" id="show-upload-modal-btn" class="icon-button">+</button>
+                    <button type="button" id="start-chat-btn" class="icon-button send-button">→</button>
+                </div>
+                <p class="question-example-label">QUESTION'S EXAMPLE</p>
+                <div class="example-questions">
+                    <button type="button" class="secondary-button example-btn" data-question="SUMMARIZE THE PAPER">SUMMARIZE THE PAPER</button>
+                    <button type="button" class="secondary-button example-btn" data-question="LIST A CITED PAPER">LIST A CITED PAPER</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="answer-page" class="view hidden">
+            <div class="two-panel-layout">
+                <div class="pdf-panel">
+                    <div class="pdf-toolbar">
+                        <span id="pdf-filename">Awaiting PDF Upload...</span>
+                        <div class="controls">
+                            <span class="control-icon" id="page-info">1 of 1</span>
+                        </div>
+                    </div>
+                    <div id="pdf-viewer-content" class="pdf-content-mock">
+                        <p class="pdf-mock-intro">Upload a PDF to begin rendering...</p>
+                    </div>
+                </div>
+
+                <div class="chat-panel">
+                    <div class="chat-header">RefHunters</div>
+                    <div id="chat-messages" class="chat-messages"></div>
+                    <div class="chat-input-container">
+                        <input type="text" id="chat-input" placeholder="Ask about the paper..." class="main-input">
+                        <button type="button" id="send-chat-btn" class="icon-button send-button">→</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="upload-modal" class="modal-overlay hidden">
+            <div class="modal-card">
+                <div class="modal-header">
+                    <h2>Upload Paper</h2>
+                    <button type="button" id="hide-upload-modal-btn" class="close-button">x</button>
+                </div>
+                <p class="modal-subtext">Choose to upload a PDF file to get started</p>
+                <p class="upload-label">Upload PDF File</p>
+                <div class="upload-dropzone" id="upload-dropzone">
+                    <input type="file" id="pdf-file-input" accept=".pdf" class="hidden" style="display:none;">
+                    <div class="upload-content">
+                        <span class="upload-icon">↑</span>
+                        <p>Click to upload or drag and drop</p>
+                        <p class="small-text">PDF files only</p>
+                    </div>
+                </div>
+                <button type="button" id="modal-continue-btn" class="primary-button disabled" disabled>Continue</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
