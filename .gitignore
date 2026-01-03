@@ -1,1 +1,60 @@
+# Environment variables
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+**/.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn
+
+# TypeScript
+dist/
+*.tsbuildinfo
+build/
+
+# Project-specific / Second-backend
+Second-backend/uploads/
+Second-backend/downloads/
+Second-backend/grobid-output/
+Second-backend/*.pdf
+
+# Project-specific / Second-Frontend
+Second-Frontend/dist/
+Second-Frontend/.next/
+
+# Global Ignore patterns
+downloads/
+uploads/
+grobid-output/
+abstracts/
+
+# IDE
+.vscode/
+.idea/
+.project
+.classpath
+.settings/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
