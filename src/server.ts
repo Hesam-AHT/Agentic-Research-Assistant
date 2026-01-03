@@ -35,11 +35,8 @@ const upload = multer({
   dest: "uploads/",
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === "application/pdf") {
-      cb(null, true);
-    } else {
-      cb(new Error("Only PDF files are allowed"));
-    }
+    if (file.mimetype === "application/pdf") cb(null, true);
+    else cb(new Error("Only PDF files are allowed"));
   },
 });
 
@@ -48,32 +45,20 @@ if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads", { recursive: true });
 }
 
-// Agent registry
-const agents: AgentRegistry = {
-  A1: { run: runA1 },
-  A2: { run: runA2 },
-};
-
-// Build graphs
-const answerGraph = buildA0AnswerGraph(agents);
-const feedbackGraph = buildA0FeedbackGraph();
-
 // Helper to generate session ID
 function generateSessionId(): string {
   return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 // Helper function to download PDF from DOI
-async function downloadPdfFromDOI(doi: string): Promise<string | null> {
+async function downloadPdfFromDOI(doi: string): Promise<string | undefined> {
   try {
-    // Try to get PDF URL from DOI
     const doiUrl = `https://doi.org/${doi}`;
     const response = await axios.get(doiUrl, {
       maxRedirects: 5,
       timeout: 10000,
     });
 
-    // Try common PDF URL patterns
     const pdfUrls = [
       response.request?.responseURL?.replace(/\.html?$/, ".pdf"),
       `https://arxiv.org/pdf/${doi}.pdf`,
@@ -86,27 +71,22 @@ async function downloadPdfFromDOI(doi: string): Promise<string | null> {
           responseType: "arraybuffer",
           timeout: 30000,
         });
-
         if (pdfResponse.status === 200 && pdfResponse.data) {
           const safeName = doi.replace(/[^a-zA-Z0-9]/g, "_");
           const downloadDir = "uploads";
-          if (!fs.existsSync(downloadDir)) {
-            fs.mkdirSync(downloadDir, { recursive: true });
-          }
+          if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
           const filePath = path.join(downloadDir, `${safeName}.pdf`);
           fs.writeFileSync(filePath, pdfResponse.data);
           return filePath;
         }
-      } catch (e) {
-        // Try next URL
+      } catch {
         continue;
       }
     }
-
-    return null;
+    return undefined;
   } catch (error) {
     console.error("[Server] Error downloading PDF from DOI:", error);
-    return null;
+    return undefined;
   }
 }
 
@@ -116,56 +96,41 @@ app.post("/api/query", upload.single("file"), async (req, res) => {
     const { query, sessionId, doi } = req.body;
     const file = req.file;
 
-    if (!query) {
-      return res.status(400).json({ error: "Query is required" });
-    }
+    if (!query) return res.status(400).json({ error: "Query is required" });
 
     const session = sessionId || generateSessionId();
-    
-    // Prepare sources (PDF file paths) - only one PDF allowed
+
+    // Prepare source PDF path
     let sourcePath: string | undefined = undefined;
-    
-    if (file) {
-      sourcePath = file.path;
-    } else if (doi) {
-      // Download PDF from DOI
-      console.log(`[Server] Downloading PDF from DOI: ${doi}`);
-      const downloadedPath = await downloadPdfFromDOI(doi);
-      if (downloadedPath) {
-        sourcePath = downloadedPath;
-      } else {
-        return res.status(400).json({ 
-          error: "Failed to download PDF from DOI. Please upload the PDF file directly." 
+
+    if (file) sourcePath = file.path;
+    else if (doi) {
+      sourcePath = (await downloadPdfFromDOI(doi)) || undefined;
+      if (!sourcePath)
+        return res.status(400).json({
+          error: "Failed to download PDF from DOI. Please upload the PDF manually.",
         });
-      }
     }
 
-    if (!sourcePath) {
-      return res.status(400).json({ 
-        error: "Either a PDF file or DOI must be provided" 
-      });
-    }
-
-    // Build initial state
-    const initialState: A0State = {
-      sessionId: session,
-      userInput: query,
-      sources: [sourcePath],
-      trace: [],
-    };
+    if (!sourcePath)
+      return res.status(400).json({ error: "Either a PDF file or DOI must be provided" });
 
     console.log(`\n[Server] Processing query for session ${session}`);
     console.log(`Query: ${query}`);
     console.log(`Source: ${sourcePath}`);
 
-    // Run the graph
-    const result: any = await answerGraph.invoke(initialState);
+    // Run A0 directly
+    const result: any = await runA0({
+      sessionId: session,
+      userInput: query,
+      sources: [sourcePath],
+    });
 
-    // Extract highlighted sections from main paper
+    // Highlighted sections
     const mainPaperEvidence = result.evidence?.find((e: any) => e.is_main_paper);
     const highlightedSections = mainPaperEvidence?.locations || [];
 
-    // Format citations with location details
+    // Format citations
     const formattedCitations = (result.citations || []).map((citation: any) => {
       if (citation.is_main_paper && citation.locations) {
         return {
@@ -191,7 +156,7 @@ app.post("/api/query", upload.single("file"), async (req, res) => {
         start_sentence: loc.start_sentence,
         text: loc.start_sentence,
       })),
-      trace: result.trace || [],
+      confidence: result.confidence,
       evidenceCount: result.evidence?.length || 0,
       mainPaperPath: mainPaperEvidence?.pdf_path || sourcePath,
     });
@@ -209,102 +174,61 @@ app.post("/api/feedback", async (req, res) => {
   try {
     const { sessionId, feedback, lastQuery, lastAnswer } = req.body;
 
-    if (!sessionId) {
-      return res.status(400).json({ error: "sessionId is required" });
-    }
-
-    if (!feedback) {
-      return res.status(400).json({ error: "feedback is required" });
-    }
+    if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+    if (!feedback) return res.status(400).json({ error: "feedback is required" });
 
     console.log(`\n[Server] Processing feedback for session ${sessionId}`);
     console.log(`Feedback:`, feedback);
 
-    // Build feedback state
-    const feedbackState: FeedbackState = {
-      sessionId,
-      feedback,
-      lastQuery,
-      lastAnswer,
-    };
+    const mem = new GlobalMemory(sessionId);
 
-    // Process feedback
-    const result: any = await feedbackGraph.invoke(feedbackState);
+    // Update blacklist if wrong citations
+    const blacklist = (await mem.read<string[]>("blacklist")) || [];
+    for (const w of feedback.wrong_citations ?? []) {
+      if (w.doi && !blacklist.includes(w.doi)) blacklist.push(w.doi);
+    }
+    await mem.write("blacklist", blacklist);
+    await mem.append("feedback_log", feedback);
 
-    const decision = result.decision;
-    let nextAction = null;
+    let nextAction: any = null;
 
-    // Based on feedback decision, route to appropriate agent
-    if (decision.route_to === "A1") {
-      // Need new knowledge base
-      console.log("[Server] Routing to A1 for new knowledge base");
-      
-      // Get blacklist from memory
-      const mem = new GlobalMemory(sessionId);
-      const blacklist = (await mem.read<string[]>("blacklist")) || [];
-      
+    // Route to appropriate agent based on feedback
+    if (feedback.wrong_citations?.length > 0 || feedback.needs_more_info) {
+      // A1: Retrieve new knowledge base
       const a1Task = {
         agent: "A1" as const,
         action: "retrieve" as const,
         inputs: {
-          query: decision.new_query || lastQuery || "",
+          query: lastQuery || "",
           topN: 40,
           topK: 8,
-          penalties: { blacklist: blacklist },
+          penalties: { blacklist },
         },
       };
-
-      const a1Result = await agents.A1.run(a1Task);
-      
-      nextAction = {
-        agent: "A1",
-        result: a1Result,
-        message: "New knowledge base created. Would you like a new answer?",
-      };
-    } else if (decision.route_to === "A2") {
-      // Need new answer with existing evidence
-      console.log("[Server] Routing to A2 for new answer");
-      
-      // Get last evidence from memory or use empty
-      const mem = new GlobalMemory(sessionId);
+      const a1Result = await runA1(a1Task);
+      nextAction = { agent: "A1", result: a1Result, message: "New knowledge base created. Would you like a new answer?" };
+    } else if (feedback.answer_wrong) {
+      // A2: Reason with existing evidence
       const lastWorking = await mem.read("working");
-      const evidence = lastWorking?.last_evidence || [];
-      
-      // Get blacklist for penalties
-      const blacklist = (await mem.read<string[]>("blacklist")) || [];
-
-      if (evidence.length === 0) {
-        return res.status(400).json({
-          error: "No evidence available. Please submit a new query first.",
-        });
-      }
+      const evidence = (lastWorking as any)?.last_evidence || [];
+      if (evidence.length === 0)
+        return res.status(400).json({ error: "No evidence available. Please submit a new query first." });
 
       const a2Task = {
         agent: "A2" as const,
         action: "reason" as const,
         inputs: {
           query: lastQuery || "",
-          evidence: evidence,
+          evidence,
           expertise: "intermediate",
           format: feedback.verbosity === "shorter" ? "bullets" : "markdown",
         },
       };
-
-      const a2Result = await agents.A2.run(a2Task);
-      
-      nextAction = {
-        agent: "A2",
-        result: a2Result,
-        message: "New answer generated based on feedback",
-      };
+      const a2Result = await runA2(a2Task);
+      nextAction = { agent: "A2", result: a2Result, message: "New answer generated based on feedback" };
     }
 
-    res.json({
-      sessionId,
-      decision: decision.reason,
-      nextAction,
-      trace: result.trace || [],
-    });
+    res.json({ sessionId, nextAction });
   } catch (error) {
     console.error("[Server] Error processing feedback:", error);
     res.status(500).json({
@@ -312,49 +236,6 @@ app.post("/api/feedback", async (req, res) => {
       message: error instanceof Error ? error.message : String(error),
     });
   }
-});
-
-// GET / - Root endpoint with API information and examples
-app.get("/", (req, res) => {
-  res.json({
-    name: "Agentic Research Assistant API",
-    version: "1.0.0",
-    status: "running",
-    endpoints: {
-      health: {
-        method: "GET",
-        path: "/api/health",
-        description: "Health check endpoint",
-        example: "curl http://localhost:3000/api/health",
-      },
-      query: {
-        method: "POST",
-        path: "/api/query",
-        description: "Submit a query with PDF file or DOI",
-        required: ["query"],
-        optional: ["file", "doi", "sessionId"],
-        examples: {
-          withFile: `curl -X POST http://localhost:3000/api/query \\
-  -F "file=@paper.pdf" \\
-  -F "query=What is the main contribution of this paper?"`,
-          withDOI: `curl -X POST http://localhost:3000/api/query \\
-  -H "Content-Type: application/json" \\
-  -d '{"query":"What methods are used?","doi":"10.1234/example.doi"}'`,
-        },
-      },
-      feedback: {
-        method: "POST",
-        path: "/api/feedback",
-        description: "Provide feedback on answers",
-        required: ["sessionId", "feedback"],
-        example: `curl -X POST http://localhost:3000/api/feedback \\
-  -H "Content-Type: application/json" \\
-  -d '{"sessionId":"session_123","feedback":{"helpful":true}}'`,
-      },
-    },
-    note: "POST endpoints cannot be accessed via browser. Use curl, Postman, or your frontend application.",
-    documentation: "See README.md for detailed API documentation",
-  });
 });
 
 // GET /api/health - Health check
