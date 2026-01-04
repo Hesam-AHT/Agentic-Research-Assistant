@@ -1,1 +1,42 @@
+# Environment variables
 .env
+.env.local
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# Backend directories
+RefHunters-Backend/uploads/
+RefHunters-Backend/downloads/
+RefHunters-Backend/grobid-output/
+RefHunters-Backend/node_modules/
+RefHunters-Backend/dist/
+RefHunters-Backend/.env
+RefHunters-Backend/*.js
+
+# Project-specific
+downloads/
+abstracts/
+grobid-output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.logenv

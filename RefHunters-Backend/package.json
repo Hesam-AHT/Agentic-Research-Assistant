@@ -1,0 +1,54 @@
+{
+  "name": "agentic-research-assistant",
+  "version": "1.0.0",
+  "description": "Multi-agent system for academic research paper analysis with citation extraction and Q&A",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --watch src/index.ts",
+    "dev:server": "tsx --watch src/server.ts",
+    "start": "node dist/index.js",
+    "start:server": "node dist/server.js",
+    "build": "tsc",
+    "test:a0": "tsx src/agents/a0/a0.ts",
+    "test:a1": "tsx src/agents/a1/a1.ts",
+    "test:a2": "tsx src/agents/a2/a2.ts"
+  },
+  "keywords": [
+    "research",
+    "papers",
+    "citations",
+    "agent",
+    "llm",
+    "arxiv",
+    "grobid"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@langchain/core": "^0.3.21",
+    "@langchain/langgraph": "^0.2.19",
+    "@langchain/openai": "^0.3.11",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "form-data": "^4.0.1",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.77.0",
+    "pdf-parse": "^2.2.2",
+    "redis": "^4.7.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.2",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
