@@ -30,9 +30,9 @@ graph TD
 
 ### Agent A0 (Controller)
 *Distributed across modular nodes in `src/nodes/`.*
-- **Brain**: Classifies query type (QA/Summary), complexity, and extracts keywords.
-- **Decomposer**: Splits complex global queries into atomic sub-questions.
-- **Planner**: Builds a list of `retrieve` and `reason` tasks.
+- **Brain**: Classifies query type (QA/Compare/Explain), complexity, and **extracts keywords** for filtering.
+- **Decomposer**: **SIMPLIFIED** - No longer splits queries. Creates a single clarified question using Brain's keywords.
+- **Planner**: Builds a single `retrieve` task (A1) and one `reason` task (A2).
 
 ### Agent A1 (Data & Evidence)
 *Handles information acquisition in `a1.ts`.*
@@ -56,19 +56,21 @@ Decoupled logic for each stage of the workflow (Entry, Classify, etc.).
 ### 2. Utilities (`src/utils/`)
 - **TaskBuilder**: Standardizes task objects for A1/A2.
 - **TaskExecutor**: Handles agent loops and tool execution.
-- **EvidenceAggregator**: Consolidates results from multiple sub-queries into a unified vector store.
+- **EvidenceAggregator**: Consolidates all retrieved evidence into a unified vector store.
 - **SessionVectorStore**: Local semantic search with cosine similarity and main-paper boosting.
 
 ---
 
 ## 🔄 Technical Data Flow
 
-1.  **Entry**: Session state is restored from **Redis**.
-2.  **Logic**: Query is categorized and planned.
-3.  **Discovery (A1)**: Agent navigates the citation network to find source PDFs.
-4.  **Ranking**: `EvidenceAggregator` ranks all discovered chunks by semantic relevance.
-5.  **Synthesis (A2)**: Agent writes the answer based on the high-ranking evidence.
-6.  **Exit**: Results and conversation history are saved to Redis.
+1.  **Entry**: Session state is restored from **Redis**. Chat history is loaded.
+2.  **Classify (Brain)**: Query is analyzed for task type, complexity, and **keywords are extracted**.
+3.  **Decompose**: **Simplified** - Single clarified question is created (no sub-questions).
+4.  **Plan**: Single A1 retrieve task is created with **all keywords** from Brain.
+5.  **Discovery (A1)**: Agent uses keywords to filter citations and retrieve relevant PDFs from arXiv.
+6.  **Ranking**: `EvidenceAggregator` ranks all chunks by semantic relevance to the query.
+7.  **Synthesis (A2)**: Writer generates answer using top-ranked evidence chunks.
+8.  **Exit**: Results and conversation history are saved to Redis.
 
 ---
 

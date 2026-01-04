@@ -20,7 +20,8 @@ export class TaskBuilder {
         brain: BrainOutput,
         hasIngest: boolean,
         sessionId: string,
-        blacklist: string[] = []
+        blacklist: string[] = [],
+        sources: string[] = []
     ): any {
         const skipReferences = brain.task_type === "summarize";
 
@@ -31,6 +32,7 @@ export class TaskBuilder {
                 action: "retrieve",
                 inputs: {
                     query,
+                    sources,
                     topN: skipReferences
                         ? WORKFLOW_CONFIG.retrieval.topN.summary
                         : WORKFLOW_CONFIG.retrieval.topN.default,

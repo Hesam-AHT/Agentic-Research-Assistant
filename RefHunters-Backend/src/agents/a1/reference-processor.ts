@@ -8,6 +8,7 @@ import path from "path";
 import axios from "axios";
 import FormData from "form-data";
 import { parseSectionsFromGrobidXML } from "./sections-parser";
+import { extractTextFast, chunkText } from "./fast-pdf-parser";
 
 export interface Citation {
     title: string;
@@ -47,99 +48,50 @@ export async function processReferencePaper(
     citation: Citation,
     refIndex: number
 ): Promise<Evidence[]> {
-    console.log(`\n[RefProcessor]  Processing reference: "${citation.title}"`);
+    console.log(`\n[RefProcessor]  Fast-Processing reference: "${citation.title}"`);
     console.log(`[RefProcessor]  PDF: ${path.basename(pdfPath)}`);
 
-    const grobidUrl = process.env.GROBID_URL || "http://localhost:8070";
+    try {
+        const startTime = Date.now();
+        const fullText = await extractTextFast(pdfPath);
 
-    // Check cache first
-    const pdfBasename = path.basename(pdfPath, '.pdf');
-    const cacheDir = "grobid-output";
-    const cacheFile = path.join(cacheDir, `${pdfBasename}_fulltext.xml`);
-
-    if (!fs.existsSync(cacheDir)) {
-        fs.mkdirSync(cacheDir, { recursive: true });
-    }
-
-    let xmlText = "";
-
-    // Try to load from cache
-    if (fs.existsSync(cacheFile)) {
-        console.log(`[RefProcessor]  Using cached GROBID XML`);
-        xmlText = fs.readFileSync(cacheFile, "utf-8");
-    } else {
-        // Process with GROBID
-        console.log(`[RefProcessor]  Running GROBID processFulltextDocument...`);
-
-        try {
-            const fileBuffer = fs.readFileSync(pdfPath);
-            const formData = new FormData();
-            formData.append("input", fileBuffer, {
-                filename: path.basename(pdfPath),
-                contentType: "application/pdf"
-            });
-
-            const startTime = Date.now();
-            const response = await axios.post(
-                `${grobidUrl}/api/processFulltextDocument`,
-                formData,
-                {
-                    headers: formData.getHeaders(),
-                    timeout: 120000, // 2 minutes for full document
-                }
-            );
-            const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-
-            xmlText = response.data;
-            console.log(`[RefProcessor]  GROBID completed in ${duration}s`);
-
-            // Cache it
-            fs.writeFileSync(cacheFile, xmlText);
-            console.log(`[RefProcessor]  Cached to ${cacheFile}`);
-        } catch (error) {
-            console.error(`[RefProcessor]  GROBID failed:`, error);
-
-            // Fallback: return single chunk with title+abstract
-            return [{
-                title: citation.title,
-                authors: citation.authors,
-                year: citation.year,
-                journal: citation.journal || "N/A",
-                doi: citation.doi,
-                arxiv_id: citation.arxiv_id,
-                text: citation.title, // Minimal fallback
-                source_type: "pdf",
-                chunk_id: `ref_${refIndex}_0`,
-                is_main_paper: false
-            }];
+        if (!fullText || fullText.length < 100) {
+            throw new Error("Extracted text is too short or empty");
         }
-    }
 
-    // Parse sections from XML
-    console.log(`[RefProcessor]  Parsing sections from XML...`);
-    const sections = parseSectionsFromGrobidXML(xmlText);
-    console.log(`[RefProcessor]  Extracted ${sections.length} sections`);
+        const textChunks = chunkText(fullText);
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`[RefProcessor]  Fast-parsing completed in ${duration}s (${textChunks.length} chunks)`);
 
-    // Create Evidence chunks
-    const chunks: Evidence[] = sections.map((section, index) => {
-        console.log(`[RefProcessor]   ✓ ${section.section}: ${section.text.length} chars`);
-
-        return {
+        // Create Evidence chunks
+        const chunks: Evidence[] = textChunks.map((text, index) => ({
             title: citation.title,
             authors: citation.authors,
             year: citation.year,
             journal: citation.journal || "N/A",
             doi: citation.doi,
             arxiv_id: citation.arxiv_id,
-            text: section.text,
+            text: text,
             source_type: "pdf",
-            section: section.section,
+            section: index === 0 ? "Introduction/Abstract" : `Section ${index + 1}`,
             chunk_id: `ref_${refIndex}_${index}`,
             is_main_paper: false
-        };
-    });
+        }));
 
-    console.log(`[RefProcessor]  Created ${chunks.length} evidence chunks for "${citation.title}"\n`);
-
-    return chunks;
+        return chunks;
+    } catch (error) {
+        console.error(`[RefProcessor]  Fast-parsing failed, using minimal fallback:`, error);
+        return [{
+            title: citation.title,
+            authors: citation.authors,
+            year: citation.year,
+            journal: citation.journal || "N/A",
+            doi: citation.doi,
+            arxiv_id: citation.arxiv_id,
+            text: citation.title, // Minimal fallback
+            source_type: "pdf",
+            chunk_id: `ref_${refIndex}_0`,
+            is_main_paper: false
+        }];
+    }
 }

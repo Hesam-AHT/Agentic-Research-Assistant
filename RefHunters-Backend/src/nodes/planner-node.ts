@@ -12,15 +12,18 @@ export function plannerNode(state: A0State): Partial<A0State> {
 
     // Add retrieve tasks
     state.decomposition!.subquestions.forEach((q: string, i: number) => {
+
         plan.push(TaskBuilder.createRetrieveTask(
             i,
             q,
             state.brain!,
             hasSources,
             state.sessionId,
-            state.blacklist
+            state.blacklist,
+            state.sources
         ));
     });
+
 
     // Add reason task
     const retrieveDeps = plan

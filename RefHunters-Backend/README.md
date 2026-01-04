@@ -28,8 +28,8 @@ The backend uses a **LangGraph** orchestrator to coordinate specialized agents:
 - **Entry → Classify → Decompose → Planner → Dispatch → Exit**
 
 ### Agents
-- **A0 (Orchestrator)**: Classifies queries, decomposes complex tasks, and plans execution.
-- **A1 (Data)**: Uses GROBID to parse PDFs and arXiv API to fetch external references.
+- **A0 (Orchestrator)**: Classifies queries, extracts keywords, and creates a single clarified question. *Note: A0 logic is distributed across modular nodes in `src/nodes/`. **Decomposer no longer splits queries** - it uses keywords from Brain to clarify a single question.*
+- **A1 (Data)**: Uses GROBID to parse PDFs and arXiv API to fetch external references. Filters citations using keywords.
 - **A2 (Writer)**: Synthesizes evidence into cited, expertise-aware answers.
 
 ---
@@ -53,9 +53,10 @@ src/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/answer` | Primary Q&A endpoint |
+| `POST` | `/api/query` | Primary Q&A endpoint |
 | `POST` | `/api/upload` | PDF upload & session initialization |
 | `POST` | `/api/feedback`| Collect user ratings |
+| `GET` | `/api/session/:sessionId` | Retrieve session history |
 
 ---
 
@@ -70,7 +71,7 @@ src/
 ## 🔧 Configuration
 
 ### Environment (.env)
-- `OPENAI_API_KEY`, `GROBID_URL`, `PORT`.
+- `OPENAI_API_KEY`, `GROBID_URL`, `PORT` (default: 3000).
 
 ### Workflow Config
 Adjust `src/config/workflow-config.ts` for iteration limits and retrieval depth.

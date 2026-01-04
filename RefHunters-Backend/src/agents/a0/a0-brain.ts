@@ -17,7 +17,7 @@ export interface BrainOutput {
     complexity: "simple" | "moderate" | "complex";
     keywords: string[];
     focus_sections?: string[];
-    filtering_strategy?: "section" | "keyword" | "hybrid";
+    filtering_strategy?: "section" | "keyword";
     reasoning?: string;
 }
 
@@ -37,16 +37,16 @@ export async function classifyQuery(query: string, chatHistory?: string): Promis
 1. Task type (qa/summarize/compare/explain)
 2. User expertise (novice/intermediate/expert)
 3. Complexity (simple/moderate/complex)
-4. Keywords (technical terms for search)
-5. Filtering strategy:
-   - "section": User wants papers FROM a specific section (e.g., "related work")
-   - "keyword": User wants papers ABOUT specific topics
-   - "hybrid": Both section AND keywords
+4. Keywords (technical terms for search, exclude generic words like "compare", "explain")
+5. Filtering strategy (SIMPLIFIED):
+   - "keyword": DEFAULT - Filter citations by topic/paper names (use this for most queries)
+   - "section": ONLY when user explicitly asks for citations from a specific section
 
 Examples:
-- "What is MagNet?" → qa, simple, keywords: ["MagNet", "architecture"]
-- "Compare MagNet with SegNet" → compare, moderate, keywords: ["MagNet", "SegNet", "comparison"]
-- "Summarize related work" → summarize, simple, section filtering, focus: ["Related Work"]`
+- "What is MagNet?" → qa, simple, keyword, keywords: ["MagNet", "architecture"]
+- "Compare MagNet with SegNet" → compare, moderate, keyword, keywords: ["MagNet", "SegNet"]
+- "Summarize related work section" → summarize, simple, section, focus: ["Related Work"]
+- "What methods are used?" → qa, simple, keyword, keywords: ["methods"]`
                 },
                 {
                     role: "user",
@@ -86,7 +86,7 @@ Examples:
                             },
                             filtering_strategy: {
                                 type: "string",
-                                enum: ["section", "keyword", "hybrid"]
+                                enum: ["section", "keyword"]
                             },
                             reasoning: {
                                 type: "string",

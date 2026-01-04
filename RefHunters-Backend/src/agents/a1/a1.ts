@@ -48,13 +48,14 @@ export type A1Task =
       topK: number;
       filters?: any;
       penalties?: any;
-      // A0 Brain decisions
-      filtering_strategy?: "section" | "keyword" | "hybrid";
+      // A0 Brain decisions (simplified to section OR keyword)
+      filtering_strategy?: "section" | "keyword";
       keywords?: string[];
       focus_sections?: string[];
       skipReferences?: boolean;
       task_type?: "qa" | "summarize" | "compare" | "explain";
       complexity?: "simple" | "moderate" | "complex";
+      sources?: string[];
     };
   };
 
@@ -72,8 +73,8 @@ class AgentState {
   private evidence: Evidence[] = [];
   public grobidXmlCache: string | null = null;
 
-  // A0 Brain decisions
-  public filteringStrategy: "section" | "keyword" | "hybrid" = "keyword";
+  // A0 Brain decisions (simplified to section OR keyword, default keyword)
+  public filteringStrategy: "section" | "keyword" = "keyword";
   public keywords: string[] = [];
   public focusSections: string[] = [];
 
@@ -338,77 +339,77 @@ Title: ${path.basename(pdfPath, '.pdf')}`;
 }
 
 /**
- * Smart citation filtering using OpenAI
- * Ranks citations by relevance to the query instead of simple keyword matching
+ * Fast keyword-based citation filtering
+ * Ranks citations by topical overlap with the query keywords
  */
 async function smartFilterCitations(
   citations: Citation[],
   query: string,
-  maxResults: number = 8 // Changed from 40 to 10 for better precision
+  maxResults: number = 8
 ): Promise<Citation[]> {
   if (citations.length === 0) return [];
 
-  console.log(`[A1]  Smart filtering ${citations.length} citations for query: "${query}"`);
-  console.log(`[A1]  Target: Top ${maxResults} most relevant`);
+  console.log(`[A1]  Fast filtering ${citations.length} citations for query: "${query}"`);
 
-  try {
-    // Prepare citation list for OpenAI
-    const citationList = citations.map((c, i) =>
-      `${i}. ${c.title} (${c.year}) - ${c.authors.slice(0, 2).join(", ")}`
-    ).join("\n");
+  // SMART keyword extraction
+  // 1. Extract capitalized terms (likely paper/method names): SegNet, DeepLab, U-Net
+  // 2. Then extract other meaningful words
+  const capitalizedTerms = query.match(/\b[A-Z][a-zA-Z0-9]*(?:[-_][A-Z][a-zA-Z0-9]*)*\b/g) || [];
 
-    const prompt = `You are filtering academic references for a research question.
+  // Extract general keywords (lowercase, filter short words)
+  const queryWords = query.toLowerCase()
+    .replace(/[^\w\s]/g, '')
+    .split(/\s+/)
+    .filter(word => word.length > 3 && !['what', 'with', 'from', 'that', 'this', 'which', 'where', 'when', 'they', 'there', 'their'].includes(word));
 
-QUESTION: "${query}"
+  // Combine: prioritize capitalized terms
+  const allKeywords = [...capitalizedTerms.map(t => t.toLowerCase()), ...queryWords];
+  const uniqueKeywords = Array.from(new Set(allKeywords));
 
-AVAILABLE CITATIONS:
-${citationList}
+  console.log(`[A1]  Keywords extracted: [${uniqueKeywords.join(', ')}]`);
 
-Task: Select the TOP ${maxResults} most relevant citations that would help answer this question.
-Consider:
-- Topical relevance to the question
-- Recency (prefer newer papers)
-- Likely quality (well-known authors/venues)
+  // Score each citation based on keyword density in title and journal
+  const scoredCitations = citations.map(cit => {
+    let score = 0;
+    const titleLower = cit.title.toLowerCase();
+    const authorsLower = cit.authors.map(a => a.toLowerCase()).join(" ");
 
-Return ONLY a JSON array of citation indices (numbers), ordered by relevance:
-[0, 5, 12, ...]
+    for (const word of uniqueKeywords) {
+      if (titleLower.includes(word)) score += 10;
+      if (authorsLower.includes(word)) score += 2;
+      if (cit.journal?.toLowerCase().includes(word)) score += 1;
+    }
 
-Return at most ${maxResults} indices.`;
+    // Slight boost for newer papers
+    const yearNum = parseInt(cit.year);
+    if (!isNaN(yearNum)) {
+      score += (yearNum - 2000) * 0.1;
+    }
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Use mini for speed
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0,
-    });
+    return { citation: cit, score };
+  });
 
-    let content = response.choices[0].message.content || "[]";
-    content = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  // Sort by score and take top N
+  const filtered = scoredCitations
+    .sort((a, b) => b.score - a.score)
+    .filter(item => {
+      // STRICT MODE: Only return citations with strong matches
+      // For exact title match: score >= 10
+      // For partial word match: at least score >= 5
+      const minScore = queryWords.length > 0 ? 5 : 0;
+      return item.score >= minScore;
+    })
+    .slice(0, maxResults)
+    .map(item => item.citation);
 
-    const selectedIndices: number[] = JSON.parse(content);
-    const filtered = selectedIndices
-      .filter(i => i >= 0 && i < citations.length)
-      .map(i => citations[i]);
+  console.log(`[A1]  Fast filter selected ${filtered.length} citations`);
 
-    console.log(`[A1]  Smart filter selected ${filtered.length} citations:`);
-    filtered.forEach((c, i) => {
-      console.log(`   ${i + 1}. ${c.title.substring(0, 60)}...`);
-    });
+  // DEBUG: Show top matches with scores
+  scoredCitations.sort((a, b) => b.score - a.score).slice(0, 5).forEach((item, i) => {
+    console.log(`[A1]   ${i + 1}. "${item.citation.title.substring(0, 50)}..." (score: ${item.score})`);
+  });
 
-    return filtered;
-  } catch (error) {
-    console.error("[A1]   Smart filter failed, falling back to simple keyword match:", error);
-
-    // Fallback: simple keyword matching
-    const keywords = query.toLowerCase().split(" ").filter(w => w.length > 3);
-    return citations
-      .filter(c =>
-        keywords.some(kw =>
-          c.title.toLowerCase().includes(kw) ||
-          c.authors.some(a => a.toLowerCase().includes(kw))
-        )
-      )
-      .slice(0, maxResults);
-  }
+  return filtered;
 }
 
 async function searchArxiv(title: string): Promise<string | null> {
@@ -547,18 +548,18 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "filter_citations",
-      description: "Filter extracted citations based on keywords.",
+      description: "Filter extracted citations based on keywords. IMPORTANT: Only return papers that are DIRECTLY relevant. For comparison queries (e.g., 'compare with SegFix'), filter for THAT specific paper only.",
       parameters: {
         type: "object",
         properties: {
           keyword: {
             type: "string",
-            description: "Search term to filter citations",
+            description: "Search term to filter citations (e.g., 'SegFix', 'GLNet')",
           },
           max_results: {
             type: "number",
-            description: "Maximum number of results",
-            default: 40,
+            description: "Maximum number of results (default 2 for focused queries)",
+            default: 8,
           },
         },
         required: ["keyword"],
@@ -722,145 +723,64 @@ async function executeFunction(
     }
 
     case "filter_citations": {
-      const { keyword, max_results = 5 } = args;
+      const { keyword: agentKeyword, max_results = 5 } = args;
       const allCitations = agentState.getCitations();
 
-      console.log(`[A1]  Total citations available: ${allCitations.length}`);
-      console.log(`[A1]  Filtering for: "${keyword}" (max ${max_results} results)`);
+      // Use A0 Brain keywords, filtering out generic comparison words
+      const genericWords = ['comparison', 'compare', 'difference', 'similar', 'explain', 'describe'];
+      const a0Keywords = agentState.keywords.filter(k => !genericWords.includes(k.toLowerCase()));
 
-      // Use A0's Brain decision for filtering strategy
-      const strategy = agentState.filteringStrategy;
-      const focusSections = agentState.focusSections;
+      const keywords = a0Keywords.length > 0 ? a0Keywords : [agentKeyword];
+      const combinedQuery = keywords.join(' ');
 
-      console.log(`[A1]  Using ${strategy} filtering (A0 Brain decision)`);
+      console.log(`[A1]  Filtering citations`);
+      console.log(`[A1]    Strategy: ${agentState.filteringStrategy}`);
+      console.log(`[A1]    Keywords: ${keywords.join(', ')}`);
+      console.log(`[A1]    Total citations: ${allCitations.length}`);
 
       let result: Citation[];
 
-      if (strategy === "section" && focusSections.length > 0 && agentState.grobidXmlCache) {
-        // A0 decided: Section-based filtering
-        const targetSection = focusSections[0];
-        console.log(`[A1]  Target section: "${targetSection}"`);
+      // SIMPLIFIED: Only two modes - section OR keyword (default)
+      if (agentState.filteringStrategy === "section" &&
+        agentState.focusSections.length > 0 &&
+        agentState.grobidXmlCache) {
 
-        // NEW: Use fuzzy matching to find actual section name
+        // SECTION-based filtering
+        const targetSection = agentState.focusSections[0];
+        console.log(`[A1]    Target section: "${targetSection}"`);
+
+        // Find matching section name (fuzzy matching)
         const actualSections = agentState.getActualSectionNames();
         const matchedSection = findMatchingSection(targetSection, actualSections);
 
-        if (matchedSection) {
-          const citationIds = extractCitationMarkersFromSection(
-            agentState.grobidXmlCache,
-            matchedSection  // Use matched section name
-          );
-
-          if (citationIds.length > 0) {
-            const indices = mapCitationIdsToIndices(citationIds, agentState.grobidXmlCache);
-            result = indices.map(i => allCitations[i]).filter(c => c !== undefined);
-            console.log(`[A1]  Section filter: ${result.length} citations from "${matchedSection}"`);
-          } else {
-            console.log(`[A1]   No citations in "${matchedSection}", fallback to keyword`);
-            result = await smartFilterCitations(allCitations, keyword, max_results);
-          }
-        } else {
-          console.log(`[A1]   No section match for "${targetSection}", fallback to keyword`);
-          result = await smartFilterCitations(allCitations, keyword, max_results);
-        }
-      } else if (strategy === "hybrid" && focusSections.length > 0 && agentState.grobidXmlCache) {
-        // A0 decided: Hybrid (section first, then keyword)
-        const targetSection = focusSections[0];
-        console.log(`[A1]  Hybrid: section "${targetSection}" + keywords`);
-
-        // NEW: Use fuzzy matching for hybrid too
-        const actualSections = agentState.getActualSectionNames();
-        const matchedSection = findMatchingSection(targetSection, actualSections);
-
-        let sectionCitations: Citation[] = [];
         if (matchedSection) {
           const citationIds = extractCitationMarkersFromSection(
             agentState.grobidXmlCache,
             matchedSection
           );
-          const indices = mapCitationIdsToIndices(citationIds, agentState.grobidXmlCache);
-          sectionCitations = indices.map(i => allCitations[i]).filter(c => c !== undefined);
-          console.log(`[A1]  Found ${sectionCitations.length} citations from "${matchedSection}"`);
-        } else {
-          console.log(`[A1]   No section match, using all citations for keyword filter`);
-          sectionCitations = allCitations;
-        }
 
-        // NEW: Two-step keyword resolution before smart filtering
-        const keywords = agentState.keywords.length > 0 ? agentState.keywords : [keyword];
-        const mainPaperChunks = agentState.getEvidence().filter(e => e.is_main_paper);
-        console.log(`[A1]  Calling findCitationsForKeywords with keywords: ${keywords.join(', ')}`);
-
-        const keywordToCitations = await findCitationsForKeywords(
-          mainPaperChunks,
-          keywords,
-          agentState.grobidXmlCache
-        );
-
-        // Collect full titles mentioned in main paper
-        const prioritizedTitles = Array.from(keywordToCitations.values()).flat();
-
-        if (prioritizedTitles.length > 0) {
-          // Find citations that match the full titles from main paper
-          const mappedCitations = sectionCitations.filter(c =>
-            prioritizedTitles.some(title => {
-              const similarity = title.toLowerCase().includes(c.title.toLowerCase().substring(0, 30)) ||
-                c.title.toLowerCase().includes(title.toLowerCase().substring(0, 30));
-              return similarity;
-            })
-          );
-
-          if (mappedCitations.length > 0) {
-            console.log(`[A1]  Two-step resolution found ${mappedCitations.length} citations from main paper`);
-            result = mappedCitations.slice(0, max_results);
+          if (citationIds.length > 0) {
+            const indices = mapCitationIdsToIndices(citationIds, agentState.grobidXmlCache);
+            result = indices
+              .map(i => allCitations[i])
+              .filter(c => c !== undefined)
+              .slice(0, max_results);
+            console.log(`[A1]  ✓ Section filter: ${result.length} citations from "${matchedSection}"`);
           } else {
-            // Fallback to smart filter
-            result = await smartFilterCitations(sectionCitations, keyword, max_results);
+            console.log(`[A1]    No citations in "${matchedSection}", falling back to keyword filter`);
+            result = await smartFilterCitations(allCitations, combinedQuery, max_results);
           }
         } else {
-          // No keyword mappings found, use smart filter
-          result = await smartFilterCitations(sectionCitations, keyword, max_results);
+          console.log(`[A1]    Section "${targetSection}" not found, falling back to keyword filter`);
+          result = await smartFilterCitations(allCitations, combinedQuery, max_results);
         }
-
-        console.log(`[A1]  Hybrid filter: ${result.length} citations`);
       } else {
-        // A0 decided: Keyword-based filtering (or default)
-        // NEW: Two-step keyword resolution for keyword strategy too
-        const keywords = agentState.keywords.length > 0 ? agentState.keywords : [keyword];
-        const mainPaperChunks = agentState.getEvidence().filter(e => e.is_main_paper);
-
-        const keywordToCitations = await findCitationsForKeywords(
-          mainPaperChunks,
-          keywords,
-          agentState.grobidXmlCache ?? undefined
-        );
-
-        const prioritizedTitles = Array.from(keywordToCitations.values()).flat();
-
-        if (prioritizedTitles.length > 0) {
-          const mappedCitations = allCitations.filter(c =>
-            prioritizedTitles.some(title => {
-              const similarity = title.toLowerCase().includes(c.title.toLowerCase().substring(0, 30)) ||
-                c.title.toLowerCase().includes(title.toLowerCase().substring(0, 30));
-              return similarity;
-            })
-          );
-
-          if (mappedCitations.length > 0) {
-            console.log(`[A1]  Two-step resolution found ${mappedCitations.length} citations`);
-            // Combine mapped citations with smart filter results
-            const remaining = allCitations.filter(c => !mappedCitations.includes(c));
-            const smartFiltered = await smartFilterCitations(remaining, keyword, Math.max(0, max_results - mappedCitations.length));
-            result = [...mappedCitations, ...smartFiltered].slice(0, max_results);
-          } else {
-            result = await smartFilterCitations(allCitations, keyword, max_results);
-          }
-        } else {
-          result = await smartFilterCitations(allCitations, keyword, max_results);
-        }
+        // KEYWORD-based filtering (DEFAULT)
+        console.log(`[A1]    Using keyword filter (default)`);
+        result = await smartFilterCitations(allCitations, combinedQuery, max_results);
       }
 
-      console.log(`[A1]  Filter returned ${result.length} citations`);
+      console.log(`[A1]  ✓ Filtered: ${result.length} citations`);
 
       return {
         success: true,
@@ -873,8 +793,8 @@ async function executeFunction(
       const { title } = args;
 
       // Rate limiting: wait 2 seconds to avoid arXiv blocking
-      console.log("[A1]   Rate limit: waiting 2s before arXiv search...");
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log("[A1]   Rate limit: waiting 500ms before arXiv search...");
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const arxivId = await searchArxiv(title);
 
@@ -900,8 +820,8 @@ async function executeFunction(
       }
 
       // Rate limiting: wait 2 seconds
-      console.log("[A1]   Rate limit: waiting 2s before PDF download...");
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log("[A1]   Rate limit: waiting 500ms before PDF download...");
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const success = await downloadPdf(arxiv_id, title);
 
@@ -916,8 +836,8 @@ async function executeFunction(
       const { arxiv_id } = args;
 
       // Rate limiting: wait 2 seconds
-      console.log("[A1]   Rate limit: waiting 2s before fetching abstract...");
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log("[A1]   Rate limit: waiting 500ms before fetching abstract...");
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const abstract = await fetchArxivAbstract(arxiv_id);
 
@@ -984,13 +904,21 @@ async function runAgent(
       role: "system",
       content: `You are A1, the Data & Evidence Agent. Extract citations, search arXiv, and build evidence collections.
 
-WORKFLOW:
-1. Extract citations from PDF (if provided)
-2. Filter citations by keywords
-3. For each relevant citation:
-   - Search arXiv with FULL title
-   - Download PDF (preferred) or fetch abstract (fallback)
-   - Add to evidence
+MANDATORY WORKFLOW (COMPLETE ALL STEPS IF REFERENCES EXIST):
+1. Extract citations from PDF → call extract_citations_from_pdf
+2. Filter citations by A0 Brain keywords → call filter_citations with keywords from A0
+3. IF filter_citations returns results:
+   a. For EACH filtered citation → call search_paper_on_arxiv
+   b. Download PDF → call download_paper_pdf
+   c. Add to evidence → call add_to_evidence
+4. IF filter returns 0 results → STOP (use main paper chunks only)
+
+CRITICAL RULES:
+- DO NOT complete after just extracting citations without trying to filter! ❌
+- You MUST call filter_citations to check for relevant papers
+- IF filter returns 0 results, that's OK - just use main paper evidence
+- IF filter returns results, you MUST download them
+- Extracting citations is step 1, filtering is step 2
 
 PDF PRIORITY:
 - Always try download_paper_pdf FIRST
@@ -999,12 +927,22 @@ PDF PRIORITY:
 - After downloading PDF, call add_to_evidence
 
 STOPPING RULES:
-- Simple queries: 2-3 reference papers
-- Moderate queries: 3-4 reference papers
-- Complex/compare queries: 5+ reference papers
+- Simple queries: 1-2 reference papers
+- Moderate queries: 2-3 reference papers
+- Complex/compare queries:
+  * "Compare X with Y" → Download only X and Y (2 papers)
+  * "Compare with previous works" or "Compare related works" → Download 4-6 relevant papers
 - DO NOT stop after just extracting citations!
 
-CRITICAL: Main paper chunks alone are insufficient. Download external references for comparison and validation.`,
+PERFORMANCE (SMART MODE): 
+- Be INTELLIGENT about downloads:
+  * For specific comparisons ("compare SegNet with MagNet") → Download ONLY mentioned papers
+  * For broad comparisons ("compare with related works") → Download top papers from Related Work section
+- The system processes PDFs INSTANTLY - speed is not a concern
+- Use "filter_citations" with specific keywords (paper names, not generic terms)
+- Use the "add_to_evidence" tool immediately after downloading
+
+CRITICAL: Match download strategy to query scope. Specific queries need specific papers. Broad queries need more papers.`,
     },
     {
       role: "user",
@@ -1014,12 +952,16 @@ CRITICAL: Main paper chunks alone are insufficient. Download external references
 
   let iteration = 0;
 
+  // Track critical tools to enforce workflow
+  let hasExtractedCitations = false;
+  let hasFilteredCitations = false;
+
   while (iteration < maxIterations) {
     iteration++;
     console.log(`\n[A1 ITERATION ${iteration}/${maxIterations}]`);
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       messages,
       tools,
       tool_choice: "auto",
@@ -1030,6 +972,8 @@ CRITICAL: Main paper chunks alone are insufficient. Download external references
     messages.push(message);
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
+      // Agent decided to stop - allow it (we now have override at function level)
+
       console.log("\n[A1 COMPLETE]");
       return {
         status: "complete",
@@ -1040,6 +984,14 @@ CRITICAL: Main paper chunks alone are insufficient. Download external references
     for (const toolCall of message.tool_calls) {
       const functionName = toolCall.function.name;
       const functionArgs = JSON.parse(toolCall.function.arguments);
+
+      // Track which critical tools were called
+      if (functionName === "extract_citations_from_pdf") {
+        hasExtractedCitations = true;
+      }
+      if (functionName === "filter_citations") {
+        hasFilteredCitations = true;
+      }
 
       const result = await executeFunction(functionName, functionArgs);
 
@@ -1257,21 +1209,34 @@ export async function run(task: A1Task): Promise<A1Result> {
       mainPaperChunks.forEach(chunk => agentState.addEvidence(chunk));
 
       // Build task string based on whether we need references
+      // IMPORTANT: Use A0 Brain keywords for filtering, not the query
+      const filterKeywords = task.inputs.keywords && task.inputs.keywords.length > 0
+        ? task.inputs.keywords.filter((k: string) => !['comparison', 'compare', 'difference', 'similar', 'explain', 'describe'].includes(k.toLowerCase()))
+        : [query];
+      const filterKeywordsStr = filterKeywords.join(", ");
+
       const referenceInstructions = needsReferences
         ? `
 CRITICAL - REFERENCE DOWNLOAD REQUIRED:
 This is a ${taskType} query with ${complexity} complexity.
-You MUST download 3-5 reference papers before stopping!
-1. Filter citations for "${query}" (find top ${topN} most relevant)
-2. For each filtered citation:
-   - Search on arXiv with FULL paper title
-   - If found: Download PDF or get abstract
-   - If not found: Skip and try next
-3. Add papers to evidence using add_to_evidence tool
-4. Blacklisted DOIs (skip these): ${JSON.stringify(blacklist)}
-5. Limit final evidence to ${topK} items
+You MUST download reference papers for EACH of these keywords: ${filterKeywordsStr}
 
-DO NOT stop after just extract_citations_from_pdf!`
+CORRECT WORKFLOW:
+1. Call filter_citations with keyword="${filterKeywords[0]}" (NOT the main paper name!)
+2. For each result, call search_paper_on_arxiv with the FULL paper title
+3. Download each found paper with download_paper_pdf
+4. Add to evidence with add_to_evidence
+
+IMPORTANT FILTER KEYWORDS (from A0 Brain):
+${filterKeywords.map((k: string, i: number) => `  ${i + 1}. "${k}"`).join("\n")}
+
+DO NOT filter for:
+- The uploaded paper's own title (the main paper you're analyzing)
+
+Only filter for the SPECIFIC paper names listed above!
+Blacklisted DOIs (skip these): ${JSON.stringify(blacklist)}
+
+If no filter keywords are provided, you may stop after extracting citations.`
         : `
 This is a simple ${taskType} query. You can stop early if you have enough evidence.
 1. Check if main paper chunks are sufficient (${mainPaperChunks.length} available)
@@ -1279,15 +1244,87 @@ This is a simple ${taskType} query. You can stop early if you have enough eviden
 3. Only search for references if main paper lacks the needed information
 4. Blacklisted DOIs (skip these): ${JSON.stringify(blacklist)}`;
 
-      const taskStr = `Build a knowledge base about "${query}".
+      const taskStr = `Compare and analyze: "${query}".
 ${referenceInstructions}
 
-CRITICAL: Do NOT call extract_citations_from_pdf on downloaded papers!
-That tool is ONLY for the main uploaded paper.
-For downloaded papers, just use their abstracts or content directly.`;
+FAST-TRACK: 
+1. If the query mentions specific methods (e.g., SegFix, GLNet), search for them IMMEDIATELY.
+2. Download the PDFs for these methods.
+3. The system processes them instantly without Grobid, so go fast.
 
-      console.log("\n[A1] Starting agent retrieval workflow...");
-      await runAgent(taskStr);
+DO NOT call extract_citations_from_pdf on downloaded papers. That is for the main paper only.`;
+
+      console.log("\n[A1] Starting DETERMINISTIC retrieval workflow...");
+
+      // Step 0: Ensure citations are extracted from main paper
+      const currentCitations = agentState.getCitations();
+      if (currentCitations.length === 0) {
+        const sources = task.inputs.sources || [];
+        console.log(`[A1] Step 0: No citations in memory, extracting from ${sources.length} source(s)...`);
+        for (const source of sources) {
+          await executeFunction("extract_citations_from_pdf", { pdf_path: source });
+        }
+      }
+      console.log(`[A1] Available citations for filtering: ${agentState.getCitations().length}`);
+      console.log(`[A1] Keywords to search: ${filterKeywords.join(', ')}`);
+
+      // DETERMINISTIC WORKFLOW - No LLM decisions, just execute steps:
+      // Step 1: Filter citations for ALL keywords
+      const filteredCitations: Citation[] = [];
+      for (const kw of filterKeywords) {
+        console.log(`\n[A1] Step 1: Filtering for keyword "${kw}"...`);
+        const filterResult = await executeFunction("filter_citations", { keyword: kw, max_results: 3 });
+        if (filterResult.success && filterResult.citations) {
+          filteredCitations.push(...filterResult.citations);
+          console.log(`[A1]   Found ${filterResult.citations.length} citations for "${kw}"`);
+        }
+      }
+
+      // Remove duplicates
+      const uniqueCitations = filteredCitations.filter((c, i, arr) =>
+        arr.findIndex(c2 => c2.title.toLowerCase() === c.title.toLowerCase()) === i
+      );
+      console.log(`[A1] Total unique citations: ${uniqueCitations.length}`);
+
+      // Step 2: Search and download each citation (limit to 5)
+      for (const citation of uniqueCitations.slice(0, 5)) {
+        console.log(`\n[A1] Step 2: Searching arXiv for "${citation.title.substring(0, 50)}..."`);
+        const searchResult = await executeFunction("search_paper_on_arxiv", { title: citation.title });
+
+        if (searchResult.success && searchResult.arxiv_id) {
+          console.log(`[A1]   Found arXiv ID: ${searchResult.arxiv_id}`);
+
+          // Step 3: Download PDF
+          console.log(`[A1] Step 3: Downloading PDF...`);
+          const downloadResult = await executeFunction("download_paper_pdf", {
+            title: citation.title,
+            arxiv_id: searchResult.arxiv_id
+          });
+
+          if (downloadResult.success) {
+            console.log(`[A1]   Downloaded: ${downloadResult.message}`);
+
+            // Step 4: Add to evidence with FULL citation object and correct fields
+            console.log(`[A1] Step 4: Adding to evidence...`);
+            await executeFunction("add_to_evidence", {
+              citation: {
+                title: citation.title,
+                authors: citation.authors,
+                year: citation.year,
+                journal: citation.journal || "N/A",
+                doi: citation.doi || ""
+              },
+              arxiv_id: searchResult.arxiv_id,
+              content_type: "pdf",
+              text: downloadResult.path  // Path to downloaded PDF
+            });
+          }
+        } else {
+          console.log(`[A1]   Not found on arXiv, skipping...`);
+        }
+      }
+
+      console.log("\n[A1] DETERMINISTIC workflow complete!");
 
       // NEW: Process downloaded reference PDFs with GROBID
       console.log("\n[A1]  Processing downloaded reference papers...");
@@ -1304,7 +1341,10 @@ For downloaded papers, just use their abstracts or content directly.`;
         // Get filtered citations to match against
         const filteredCitations = agentState.getCitations();
 
-        for (const ref of downloadedRefs) {
+        // NEW: Parallel processing of references
+        console.log(`[A1]  Processing ${downloadedRefs.length} reference papers in parallel...`);
+
+        const processTasks = downloadedRefs.map(async (ref, refIdx) => {
           try {
             // Find matching citation
             const matchingCitation = filteredCitations.find(c =>
@@ -1313,36 +1353,46 @@ For downloaded papers, just use their abstracts or content directly.`;
 
             if (!matchingCitation) {
               console.log(`[A1]   No matching citation for: ${ref.title}`);
-              continue;
+              return null;
             }
 
             const pdfPath = path.resolve(ref.text!); // e.g., "downloads/BlendMask.pdf"
 
             if (fs.existsSync(pdfPath)) {
-              console.log(`[A1]  Processing: ${path.basename(pdfPath)}`);
+              console.log(`[A1]  Starting parallel GROBID for: ${path.basename(pdfPath)}`);
 
               // Use reference-processor to extract chunks
               const chunks = await processReferencePaper(
                 pdfPath,
                 matchingCitation,
-                downloadedRefs.indexOf(ref)
+                refIdx
               );
 
-              if (chunks.length > 0) {
-                // Remove the placeholder evidence with file path
-                const evidenceList = agentState.getEvidence();
-                const index = evidenceList.indexOf(ref);
-                if (index > -1) {
-                  evidenceList.splice(index, 1);
-                }
-
-                // Add actual chunks
-                chunks.forEach(chunk => agentState.addEvidence(chunk));
-                console.log(`[A1]  Added ${chunks.length} chunks from ${ref.title}`);
-              }
+              return { ref, chunks };
             }
+            return null;
           } catch (error) {
             console.log(`[A1]  Error processing ${ref.title}:`, error);
+            return null;
+          }
+        });
+
+        const results = await Promise.all(processTasks);
+
+        // Update state sequentially to avoid race conditions
+        for (const res of results) {
+          if (res && res.chunks.length > 0) {
+            const { ref, chunks } = res;
+            // Remove the placeholder evidence with file path
+            const evidenceList = agentState.getEvidence();
+            const index = evidenceList.indexOf(ref);
+            if (index > -1) {
+              evidenceList.splice(index, 1);
+            }
+
+            // Add actual chunks
+            chunks.forEach(chunk => agentState.addEvidence(chunk));
+            console.log(`[A1]  Added ${chunks.length} chunks from ${ref.title}`);
           }
         }
       }
@@ -1404,10 +1454,10 @@ For downloaded papers, just use their abstracts or content directly.`;
 
       // Store chunks in GlobalMemory for A2
       console.log(`\n[A1]  Storing evidence in GlobalMemory...`);
-      const sessionId = ('sessionId' in task.inputs) ? task.inputs.sessionId : undefined;
+      const sessionId = (task.inputs as any).sessionId;
       let memory: any = null;
       if (sessionId) {
-        memory = new GlobalMemory(sessionId);
+        memory = new GlobalMemory(sessionId as string);
         await memory.write("evidence_chunks", finalEvidence);
         console.log(`[A1]  Stored ${finalEvidence.length} chunks in memory`);
       }

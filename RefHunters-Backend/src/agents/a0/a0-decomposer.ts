@@ -1,12 +1,10 @@
 /**
  * A0 Query Decomposer
- * Breaks complex queries into sub-questions for parallel processing
+ * SIMPLIFIED: No longer splits queries - just clarifies the original query
+ * All keywords come from A0 Brain, handled by A1 in a single retrieve task
  */
 
-import OpenAI from "openai";
 import { BrainOutput } from "./a0-brain.js";
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export interface DecompositionOutput {
     subquestions: string[];
@@ -15,97 +13,32 @@ export interface DecompositionOutput {
 }
 
 /**
- * Decompose complex queries into sub-questions
+ * SIMPLIFIED: Returns a single, clear question based on the original query and keywords
+ * A0 Brain provides keywords, A1 handles all filtering in one task
  */
 export async function decomposeQuery(
     query: string,
     brain: BrainOutput
 ): Promise<DecompositionOutput> {
 
-    console.log(`\n[A0 Decomposer] Analyzing query...`);
+    console.log(`\n[A0 Decomposer] Processing query...`);
 
-    // Simple queries don't need decomposition
-    if (brain.complexity === "simple") {
-        console.log(`[A0 Decomposer] ✓ Simple query, no split needed`);
-        return {
-            subquestions: [query],
-            strategy: "parallel",
-            reasoning: "Simple query, answer directly"
-        };
+    // Filter out MagNet/Magnet and generic words from keywords list for display
+    const genericWords = ['comparison', 'compare', 'difference', 'similar', 'explain', 'describe', 'magnet'];
+    const entidades = brain.keywords.filter(k => !genericWords.includes(k.toLowerCase()));
+
+    // Construct a "clearer" single question
+    let clearerQuestion = query;
+    if (entidades.length > 0) {
+        clearerQuestion = `Detailed information about ${entidades.join(' and ')} for the query: ${query}`;
     }
 
-    try {
-        const response = await client.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-                {
-                    role: "system",
-                    content: `Break complex research questions into sub-questions.
+    console.log(`[A0 Decomposer] ✓ Single question mode (A1 handles all keywords)`);
+    console.log(`[A0 Decomposer]   1. ${clearerQuestion}`);
 
-Rules:
-- If query asks ONE thing → keep as is
-- If query asks MULTIPLE things → split them
-- Each sub-question must be independently answerable
-- Max 5 sub-questions
-
-Examples:
-"Compare MagNet and SegNet" → ["What is MagNet?", "What is SegNet?", "How do they differ?"]
-"What is MagNet?" → ["What is MagNet?"]
-"Explain MagNet architecture and performance" → ["What is MagNet architecture?", "How does MagNet perform?"]`
-                },
-                {
-                    role: "user",
-                    content: `Query: "${query}"\nTask: ${brain.task_type}\nComplexity: ${brain.complexity}`
-                }
-            ],
-            functions: [
-                {
-                    name: "decompose",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            subquestions: {
-                                type: "array",
-                                items: { type: "string" },
-                                description: "List of sub-questions (or [original] if no split needed)"
-                            },
-                            strategy: {
-                                type: "string",
-                                enum: ["parallel", "sequential"],
-                                description: "Can sub-questions be answered in parallel?"
-                            },
-                            reasoning: {
-                                type: "string",
-                                description: "Why this decomposition?"
-                            }
-                        },
-                        required: ["subquestions", "strategy", "reasoning"]
-                    }
-                }
-            ],
-            function_call: { name: "decompose" },
-            temperature: 0
-        });
-
-        const args = response.choices[0].message.function_call?.arguments;
-        if (!args) throw new Error("No decomposition returned");
-
-        const decomposition: DecompositionOutput = JSON.parse(args);
-
-        console.log(`[A0 Decomposer] ✓ ${decomposition.subquestions.length} sub-questions (${decomposition.strategy})`);
-        decomposition.subquestions.forEach((q, i) => {
-            console.log(`[A0 Decomposer]   ${i + 1}. ${q}`);
-        });
-
-        return decomposition;
-
-    } catch (error) {
-        console.error(`[A0 Decomposer] ✗ Decomposition failed:`, error);
-        console.log(`[A0 Decomposer] Using fallback (no split)`);
-        return {
-            subquestions: [query],
-            strategy: "parallel",
-            reasoning: "Fallback due to error"
-        };
-    }
+    return {
+        subquestions: [clearerQuestion],
+        strategy: "parallel",
+        reasoning: `Single clarified question for deterministic retrieval of entities: ${entidades.join(', ')}`
+    };
 }

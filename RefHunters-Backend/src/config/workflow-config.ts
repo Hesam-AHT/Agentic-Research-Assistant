@@ -9,8 +9,8 @@ export const WORKFLOW_CONFIG = {
             summary: 2,
         },
         topK: {
-            default: 8,
-            semanticSearch: 40,
+            default: 30,// Increased from 8 - selects top 20 reference chunks (was bottleneck!)
+            semanticSearch: 40 // Increased from 40 to include more reference papers
         },
     },
     memory: {

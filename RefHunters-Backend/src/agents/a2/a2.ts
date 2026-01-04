@@ -372,7 +372,13 @@ WORKFLOW:
 
 EVIDENCE RULES:
 - Evidence is pre-sorted by relevance: [0] = MOST relevant
-- Prioritize high-ranked evidence (indices 0, 1, 2)
+- You have BOTH main paper chunks AND external reference papers (e.g., SegFix, GLNet)
+- For comparison queries, you MUST cite both the main paper AND the external references
+- Don't just cite the top 3! Look through indices 0-20 to find external papers
+- Prioritize evidence based on:
+  1. Papers mentioned in the user's query (e.g., if they ask about SegFix, cite SegFix chunks!)
+  2. Relevance score
+  3. Diversity (cite from multiple sources, not just the main paper)
 - Match section types to answer structure:
   • Abstract → Introduction/overview
   • Methods/Architecture → Main explanation

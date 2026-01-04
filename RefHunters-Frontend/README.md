@@ -11,7 +11,7 @@ The frontend is a dual-pane React application featuring a chat interface and a P
 ### Key Routes
 - `/` → **UploadPage**: PDF upload and expertise selection.
 - `/answer` → **AnswerPage**: Interactive Q&A with live PDF highlighting.
-- `/test-highlight` → **PDFHighlightTest**: Debugging tool for PDF section search.
+- `/test-highlight` → **PDFHighlightTest**: *Debugging tool for PDF section search (development only).*
 
 ---
 
@@ -23,9 +23,11 @@ src/
 │   ├── upload/     # UploadPage.tsx
 │   ├── answer/     # AnswerPage.tsx (Main chat logic)
 │   ├── shared/     # PDFViewer.tsx (pdf.js integration)
-│   └── test/       # PDFHighlightTest.tsx
+│   └── test/       # PDFHighlightTest.tsx (debug tool)
 ├── services/       # api.ts (Backend communication)
 ├── types/          # API and PDF type definitions
+├── hooks/          # (Empty - reserved for future use)
+├── store/          # (Empty - reserved for future use)
 └── App.tsx         # Router configuration
 ```
 
@@ -85,6 +87,11 @@ npm run dev
 - ✅ Multi-page PDF Rendering
 - ✅ Citation-to-PDF Highlighting
 - ⏳ Multi-PDF Analysis (Planned)
+
+## 🧪 Testing
+
+- **Test Script**: `test-frontend.ts` - CLI utility to test API integration
+- **Usage**: `npx tsx test-frontend.ts "<question>" <expertise> <pdf-path>`
 
 ---
 

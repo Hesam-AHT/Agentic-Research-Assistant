@@ -236,7 +236,7 @@ export default function AnswerPage() {
                                                                                 📄 Main Paper
                                                                             </span>
                                                                         )}
-                                                                        {cit.section && (
+                                                                        {cit.section && cit.evidenceChunk?.is_main_paper && (
                                                                             <span className="text-gray-500"> • Section: {cit.section}</span>
                                                                         )}
                                                                     </div>
