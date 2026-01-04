@@ -3,6 +3,8 @@ import * as path from "path";
 import axios from "axios";
 import OpenAI from "openai";
 import { parseLLMJson } from "../../utils";
+import { parseSectionsFromGrobidXML } from "./sections-parser.js";
+import { extractCitationMarkersFromSection, mapCitationIdsToIndices } from "./citation-extractor.js";
 import dotenv from "dotenv";
 const pdfParse = require("pdf-parse");
 
@@ -55,6 +57,13 @@ export interface Evidence {
   is_main_paper?: boolean; // True if this is the user's uploaded paper
   locations?: TextLocation[]; // Location info for text snippets from main paper
   pdf_path?: string; // Path to the main paper PDF
+
+  // Section metadata for frontend highlighting
+  section?: string; // Section name (e.g., "Introduction", "Methods")
+  page?: number; // Page number where section appears
+  chunk_id?: string; // Unique identifier for the chunk (e.g., "main_0")
+  start_char?: number; // For future text highlighting
+  end_char?: number; // For future text highlighting
 }
 
 export type A1Task =
@@ -243,6 +252,59 @@ async function extractReferencesGrobid(pdfPath: string): Promise<string[]> {
     return [];
   }
 }
+
+/**
+ * Extract FULL document structure from main paper using GROBID
+ * Returns structured sections (Abstract, Introduction, Methods, etc.)
+ */
+async function extractFullDocumentGrobid(pdfPath: string): Promise<any> {
+  const grobidUrl = process.env.GROBID_URL || "http://localhost:8070";
+
+  console.log(`[A1]  GROBID: Extracting FULL document structure from ${path.basename(pdfPath)}`);
+  console.log(`[A1]  GROBID URL: ${grobidUrl}/api/processFulltextDocument`);
+
+  // Check cache first
+  const pdfBasename = path.basename(pdfPath, '.pdf');
+  const cacheDir = "grobid-output";
+  const cacheFile = path.join(cacheDir, `${pdfBasename}_fulltext.xml`);
+
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+  }
+
+  if (fs.existsSync(cacheFile)) {
+    console.log(`[A1]  GROBID: Using cached full document XML from ${cacheFile}`);
+    const xmlText = fs.readFileSync(cacheFile, 'utf-8');
+    return { xml: xmlText, cached: true };
+  }
+
+  try {
+    const fileBuffer = fs.readFileSync(pdfPath);
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer], { type: "application/pdf" });
+    formData.append("input", blob, path.basename(pdfPath));
+
+    const startTime = Date.now();
+    const response = await axios.post(
+      `${grobidUrl}/api/processFulltextDocument`,
+      formData
+    );
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+
+    const xmlText = response.data;
+    console.log(`[A1]  GROBID: Received ${xmlText.length} chars of full document XML in ${elapsed}s`);
+
+    // Save to cache file
+    fs.writeFileSync(cacheFile, xmlText);
+    console.log(`[A1]  GROBID: Cached full document XML to ${cacheFile}`);
+
+    return { xml: xmlText, cached: false };
+  } catch (error) {
+    console.error("[A1]  GROBID full document extraction failed:", error);
+    return null;
+  }
+}
+
 
 // ============================================================================
 // DIRECT XML CITATION PARSER (No LLM Required)
@@ -1106,24 +1168,82 @@ export async function run(task: A1Task): Promise<A1Result> {
       const taskStr = `Extract all citations from these PDF files: ${sources.join(", ")}. Store them in memory.`;
       await runAgent(taskStr);
 
-      // CHANGED BY DATE: 2026-01-03 - Improved metadata for main paper
+      // CHANGED BY DATE: 2026-01-04 - Extract sections using GROBID
       const filename = path.basename(mainPaperPath);
       const cleanTitle = filename.replace(/_/g, " ").replace(/-?\d+-\d+\.pdf$/i, "").replace(".pdf", "");
 
       const evidence: Evidence[] = [];
-      if (extracted.fullText) {
-        evidence.push({
-          title: cleanTitle,
-          authors: [], // Leave empty instead of "Unknown" to avoid ugly UI
-          year: "",    // Leave empty
-          journal: "Main Paper",
-          text: extracted.fullText,
-          source_type: "pdf",
-          is_main_paper: true,
-          pdf_path: mainPaperPath,
-          locations: []
-        });
+
+      console.log("\n[A1] Extracting main paper sections with GROBID...");
+      const grobidResult = await extractFullDocumentGrobid(mainPaperPath);
+
+      if (grobidResult && grobidResult.xml) {
+        // Parse sections from XML
+        const sections = parseSectionsFromGrobidXML(grobidResult.xml);
+
+        if (sections.length > 0) {
+          console.log(`[A1]  Found ${sections.length} sections in main paper`);
+
+          // Create evidence for each section
+          for (let i = 0; i < sections.length; i++) {
+            const section = sections[i];
+            const sectionEvidence: Evidence = {
+              title: cleanTitle,
+              authors: [], // Leave empty for main paper
+              year: "",
+              journal: "Main Paper",
+              text: section.text,
+              source_type: "pdf",
+              is_main_paper: true,
+              pdf_path: mainPaperPath,
+              section: section.section,  // NEW: Section name
+              page: section.page,        // NEW: Page number
+              chunk_id: `main_${i}`,     // NEW: Unique chunk ID
+              locations: []
+            };
+            evidence.push(sectionEvidence);
+            console.log(`[A1]    ✓ Added section "${section.section}" (${section.text.length} chars, page ${section.page || '?'})`);
+          }
+        } else {
+          console.log("[A1]  No sections found, using fallback full text extraction");
+          // Fallback to simple full text if Grobid didn't find sections
+          if (extracted.fullText) {
+            evidence.push({
+              title: cleanTitle,
+              authors: [],
+              year: "",
+              journal: "Main Paper",
+              text: extracted.fullText,
+              source_type: "pdf",
+              is_main_paper: true,
+              pdf_path: mainPaperPath,
+              section: "Full Document",
+              chunk_id: "main_0",
+              locations: []
+            });
+          }
+        }
+      } else {
+        console.log("[A1]  GROBID extraction failed, using fallback full text");
+        // Fallback: Use simple text extraction if GROBID fails
+        if (extracted.fullText) {
+          evidence.push({
+            title: cleanTitle,
+            authors: [],
+            year: "",
+            journal: "Main Paper",
+            text: extracted.fullText,
+            source_type: "pdf",
+            is_main_paper: true,
+            pdf_path: mainPaperPath,
+            section: "Full Document",
+            chunk_id: "main_0",
+            locations: []
+          });
+        }
       }
+
+      console.log(`[A1]  Total evidence items created: ${evidence.length}`);
 
       return {
         agent: "A1",
@@ -1158,14 +1278,20 @@ export async function run(task: A1Task): Promise<A1Result> {
             title: cleanTitle || "Main Paper",
             authors: [],
             year: "",
-            journal: "",
+            journal: "Main Paper",
             text: snippets,
             source_type: "pdf",
             is_main_paper: true,
-            locations: locations,
             pdf_path: mainPaper.path,
+            locations: locations  // NEW: Add precise locations for highlighting
           };
+
           agentState.addEvidence(mainPaperEvidence);
+          console.log(`[A1]  Added main paper evidence with ${locations.length} location(s):`);
+          locations.forEach((loc, i) => {
+            console.log(`[A1]    Location ${i + 1}: paragraph ${loc.paragraph}, line ${loc.line}`);
+            console.log(`[A1]      Sentence: "${loc.start_sentence.substring(0, 60)}..."`);
+          });
         }
       }
 

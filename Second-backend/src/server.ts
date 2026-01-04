@@ -224,20 +224,33 @@ app.post("/api/query", uploadMiddleware, async (req, res) => {
     const mainPaperEvidence = result.evidence?.find((e: any) => e.is_main_paper);
     const highlightedSections = mainPaperEvidence?.locations || [];
 
-    // Format citations with location details
+    // Format citations with evidenceChunk for frontend
     const formattedCitations = (result.citations || []).map((citation: any) => {
-      if (citation.is_main_paper && citation.locations) {
-        return {
-          ...citation,
-          location_details: citation.locations.map((loc: any) => ({
-            paragraph: loc.paragraph,
-            line: loc.line,
-            start_sentence: loc.start_sentence,
-            details: `Paragraph ${loc.paragraph}, Line ${loc.line}: "${loc.start_sentence}"`,
-          })),
-        };
-      }
-      return citation;
+      // Get the actual evidence to extract text
+      const evidenceItem = result.evidence?.find((e: any) =>
+        e.title === citation.title && e.section === citation.section
+      );
+
+      // Create evidenceChunk with section text for highlighting
+      const evidenceChunk = {
+        text: evidenceItem?.text || citation.title || "",  // Section text for search
+        section: citation.section || "Unknown",  // Section name
+        page: citation.page,
+        is_main_paper: citation.is_main_paper || false,
+        locations: citation.locations || null,
+      };
+
+      return {
+        index: citation.index,
+        formatted: citation.formatted,
+        title: citation.title,
+        authors: citation.authors || [],
+        year: citation.year || "",
+        doi: citation.doi,
+        arxiv_id: citation.arxiv_id,
+        journal: citation.journal || "",
+        evidenceChunk: evidenceChunk,  // Now includes section text
+      };
     });
 
     res.json({
@@ -357,13 +370,14 @@ app.post("/api/feedback", async (req, res) => {
       // Need new answer with existing evidence
       console.log("[Server] Routing to A2 for new answer");
 
-      // Get last evidence from memory or use empty
-      const mem = new GlobalMemory(sessionId);
-      const lastWorking = await mem.read("working");
-      const evidence = lastWorking?.last_evidence || [];
+      // Get last working state if available
+      const memory = new GlobalMemory(sessionId);
+      const lastWorking = await memory.read("last_working_state");
+      const evidence = (lastWorking as any)?.last_evidence || [];
+      console.log(`[Query] Loaded ${evidence.length} evidence items from last working state`);
 
       // Get blacklist for penalties
-      const blacklist = (await mem.read<string[]>("blacklist")) || [];
+      const blacklist = (await memory.read<string[]>("blacklist")) || [];
 
       if (evidence.length === 0) {
         return res.status(400).json({

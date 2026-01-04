@@ -30,6 +30,14 @@ export interface Citation {
         section: string;
         page?: number;
         is_main_paper?: boolean;  // True if from uploaded PDF, false if from references
+        locations?: Array<{  // NEW: Precise text locations for highlighting
+            paragraph: number;
+            line: number;
+            start_sentence: string;
+            end_sentence?: string;
+            char_start?: number;
+            char_end?: number;
+        }>;
     };
 }
 

@@ -28,6 +28,7 @@ export default function AnswerPage() {
         console.log('[Citation Click] Clicked citation:', citation)
         console.log('[Citation Click] is_main_paper:', citation.evidenceChunk?.is_main_paper)
         console.log('[Citation Click] section:', citation.evidenceChunk?.section)
+        console.log('[Citation Click] text preview:', citation.evidenceChunk?.text?.substring(0, 100))
 
         // Only highlight if from main paper
         if (!citation.evidenceChunk?.is_main_paper) {
@@ -35,28 +36,42 @@ export default function AnswerPage() {
             return
         }
 
-        const { section } = citation.evidenceChunk
-        console.log('[Citation Click]  Main paper citation - searching for section in PDF')
+        const { section, text, locations } = citation.evidenceChunk
+        console.log('[Citation Click]  Main paper citation - will search for text in PDF')
         setActiveCitationIndex(citation.index)
 
-        // Search for section text in PDF and highlight
-        if (section && file) {
-            console.log(`[Citation Click] 🔍 Searching PDF for section: "${section}"`)
-
-            // We'll search the PDF text content - no page number needed!
-            // The PDFViewer will handle the search and create highlights
+        // PRIORITY 1: Use precise locations if available
+        if (locations && locations.length > 0) {
+            const exactText = locations[0].start_sentence
+            console.log(`[Citation Click] 🎯 Using precise location: "${exactText.substring(0, 60)}..."`)
             setHighlights([{
-                pageNumber: 0,  // Will be determined by search
-                text: section,   // Search query
-                color: '#FFEB3B',
+                pageNumber: 0,
+                text: exactText,
+                color: '#FFA500',  // Orange for precise
                 citationIndex: citation.index,
-                searchText: section,  // Trigger text search
-                boundingRect: { x: 0, y: 0, width: 0, height: 0 }  // Will be calculated
+                searchText: exactText,
+                boundingRect: { x: 0, y: 0, width: 0, height: 0 }
+            }])
+            return
+        }
+
+        // PRIORITY 2: Use section text for search (first 200 chars)
+        if (text && file) {
+            const searchText = text.substring(0, 200)  // First 200 chars of section
+            console.log(`[Citation Click] 🔍 Searching PDF for section text: "${searchText.substring(0, 60)}..."`)
+
+            setHighlights([{
+                pageNumber: 0,
+                text: searchText,
+                color: '#FFEB3B',  // Yellow for section text
+                citationIndex: citation.index,
+                searchText: searchText,
+                boundingRect: { x: 0, y: 0, width: 0, height: 0 }
             }])
 
-            console.log('[Citation Click]  Initiated text search for:', section)
+            console.log('[Citation Click]  Initiated text search')
         } else {
-            console.log('[Citation Click] No section name available')
+            console.log('[Citation Click] No text available for highlighting')
         }
     }
 

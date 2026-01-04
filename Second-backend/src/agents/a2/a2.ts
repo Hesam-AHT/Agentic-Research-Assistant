@@ -42,6 +42,11 @@ export interface Evidence {
   is_main_paper?: boolean;
   locations?: TextLocation[];
   pdf_path?: string;
+
+  // Section metadata for frontend highlighting
+  section?: string;
+  page?: number;
+  chunk_id?: string;
 }
 
 export interface A2Task {
@@ -312,16 +317,20 @@ async function executeFunction(
           switch (style) {
             case "APA":
               formatted = `[${displayIdx + 1}] ${authors} (${e.year}). ${e.title}. ${e.journal}.`;
+              if (e.section) formatted += ` Section: ${e.section}.`;  // NEW: Show section
               if (e.doi) formatted += ` https://doi.org/${e.doi}`;
               break;
             case "IEEE":
               formatted = `[${displayIdx + 1}] ${authors}, "${e.title}," ${e.journal}, ${e.year}.`;
+              if (e.section) formatted += ` (${e.section})`;  // NEW: Show section
               break;
             case "MLA":
               formatted = `[${displayIdx + 1}] ${authors}. "${e.title}." ${e.journal}, ${e.year}.`;
+              if (e.section) formatted += ` ${e.section}.`;  // NEW: Show section
               break;
             default:
               formatted = `[${displayIdx + 1}] ${e.title}. ${authors} (${e.year}).`;
+              if (e.section) formatted += ` - ${e.section}`;  // NEW: Show section
           }
 
           // Add location details for main paper
@@ -346,6 +355,9 @@ async function executeFunction(
             is_main_paper: e.is_main_paper || false,
             locations: locationDetails,
             pdf_path: e.pdf_path,
+            section: e.section,  // NEW: Section name for highlighting
+            page: e.page,        // NEW: Page number
+            chunk_id: e.chunk_id // NEW: Chunk identifier
           };
         });
 
