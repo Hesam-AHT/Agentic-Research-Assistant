@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import type { Highlight } from '../../types/pdf'
 
@@ -19,6 +19,9 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
     const [pdfUrl, setPdfUrl] = useState<string>('')
     const [pdfDocument, setPdfDocument] = useState<any>(null)
     const [searchHighlights, setSearchHighlights] = useState<any[]>([])  // Local highlights from search
+    const [containerWidth, setContainerWidth] = useState<number>(0)
+    const [pageWidth, setPageWidth] = useState<number>(0)
+    const containerRef = useRef<HTMLDivElement>(null)
 
     // Debug: Log when highlights change
     useEffect(() => {
@@ -184,6 +187,25 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
         }
     }
 
+    // Measure container width
+    useEffect(() => {
+        if (!containerRef.current) return
+
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0]
+            if (entry) {
+                // Subtract padding (p-4 = 16px each side)
+                setContainerWidth(entry.contentRect.width - 32)
+            }
+        })
+
+        observer.observe(containerRef.current)
+
+        return () => {
+            observer.disconnect()
+        }
+    }, [])
+
     // Create object URL from file
     useEffect(() => {
         if (file) {
@@ -197,11 +219,20 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
         }
     }, [file])
 
-    const onDocumentLoadSuccess = (pdf: any) => {
+    const onDocumentLoadSuccess = async (pdf: any) => {
         setNumPages(pdf.numPages)
         setPdfDocument(pdf)
         console.log('[PDFViewer] PDF document loaded, text search enabled')
         console.log('[PDFViewer] Pages:', pdf.numPages)
+
+        // Get first page to find base width
+        try {
+            const page = await pdf.getPage(1)
+            const viewport = page.getViewport({ scale: 1.0 })
+            setPageWidth(viewport.width)
+        } catch (err) {
+            console.error('[PDFViewer] Error getting page width:', err)
+        }
     }
 
     const zoomIn = () => {
@@ -244,7 +275,7 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
             </div>
 
             {/* Continuous PDF Display - All Pages */}
-            <div className="flex-1 overflow-y-auto overflow-x-auto p-4">
+            <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-auto p-4">
                 <div className="flex flex-col items-center gap-4">
                     <Document
                         file={pdfUrl}
@@ -271,11 +302,17 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
                                 console.log(`[PDFViewer] Page ${pageNum} has ${pageHighlights.length} highlights to render`)
                             }
 
+                            // Calculate effective scale
+                            // totalScale = zoomScale * (containerWidth / basePageWidth)
+                            const fitScale = (containerWidth && pageWidth) ? (containerWidth / pageWidth) : 1
+                            const totalScale = scale * fitScale
+
                             return (
                                 <div key={`page_${pageNum}`} className="relative mb-4 shadow-lg">
                                     <Page
                                         pageNumber={pageNum}
                                         scale={scale}
+                                        width={containerWidth || undefined}
                                         renderTextLayer={true}
                                         renderAnnotationLayer={true}
                                     />
@@ -288,10 +325,10 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
                                                 key={idx}
                                                 className="absolute pointer-events-none"
                                                 style={{
-                                                    left: `${highlight.boundingRect.x * scale}px`,
-                                                    top: `${highlight.boundingRect.y * scale}px`,
-                                                    width: `${highlight.boundingRect.width * scale}px`,
-                                                    height: `${highlight.boundingRect.height * scale}px`,
+                                                    left: `${highlight.boundingRect.x * totalScale}px`,
+                                                    top: `${highlight.boundingRect.y * totalScale}px`,
+                                                    width: `${highlight.boundingRect.width * totalScale}px`,
+                                                    height: `${highlight.boundingRect.height * totalScale}px`,
                                                     backgroundColor: highlight.color,
                                                     opacity: 0.3,
                                                     border: `2px solid ${highlight.color}`,
