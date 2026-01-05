@@ -1,82 +1,95 @@
 # RefHunters - Frontend
 
-A premium React + Vite + TypeScript interface for the **RefHunters** multi-agent research assistant.
+The user interface for RefHunters - a beautiful, interactive workspace for researching scientific papers with AI assistance.
 
-## 🚀 Quick Start
+## What Does It Do?
 
-```bash
-# 1. Install dependencies
-npm install
+The frontend provides:
+- **Dual-Pane Workspace**: View your PDF on the left, AI answers on the right
+- **Smart Highlighting**: Click citations to see exact text highlighted in the PDF
+- **Interactive Q&A**: Ask questions and get answers grounded in evidence
+- **Citation Management**: Browse all referenced papers in a dedicated sidebar
 
-# 2. Start development server
-npm run dev
+## Tech Stack
 
-# 3. Access the UI
-# Usually at http://localhost:5173 or http://localhost:5174
-```
+- **React 18** - Modern UI framework
+- **Vite** - Fast development and build tool
+- **TypeScript** - Type-safe development
+- **Tailwind CSS** - Beautiful, responsive styling
+- **PDF.js** - PDF rendering and highlighting
+- **Zustand** - Simple state management
+- **React Markdown** - Rich answer formatting
 
-## ✨ Core Features
+## Features
 
 ### 🔍 Dual-Pane Research Workspace
-The heart of RefHunters. View your paper on the left while the AI analyzes it on the right.
-- **Synchronized Scrolling**: Click a citation in the answer to see the exact text highlighted in the PDF.
-- **Smart Highlighting**: Paragraph, line, and sentence-level tracking from the main paper.
+- **Left**: PDF viewer with paragraph-level navigation
+- **Right**: AI-generated answers with citations
+- **Synchronized**: Click citations to jump to exact text in PDF
 
 ### 📝 Intelligent Q&A
-- **Multi-Source Synthesis**: Answers are grounded in both your uploaded paper and external arXiv sources.
-- **Expertise Adaptation**: Toggle between *Novice*, *Intermediate*, and *Expert* modes for tailored explanations.
-- **Reference Management**: A dedicated sidebar showcasing all cited sources with full metadata.
+- Ask any question about your uploaded paper
+- Get answers synthesized from multiple sources
+- See citations with exact locations (paragraph, line, sentence)
 
----
+### 🎯 Expertise Levels
+Toggle between modes to control answer complexity:
+- **Novice**: Simple explanations
+- **Intermediate**: Balanced detail
+- **Expert**: Technical depth
 
-## 📁 Repository Structure
+## Setup
 
-```text
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+
+2. **Configure backend URL** (create `.env` file):
+   ```env
+   VITE_API_URL=http://localhost:3001
+   ```
+
+3. **Start development server**:
+   ```bash
+   npm run dev
+   ```
+
+4. **Open in browser**:
+   Usually at `http://localhost:5173` or `http://localhost:5174`
+
+## Project Structure
+
+```
 src/
 ├── components/
-│   ├── upload/      # Initial landing & file upload
-│   ├── answer/      # Main dual-pane research workspace
-│   └── shared/      # UI primitives (Buttons, Loaders, etc.)
-├── services/        # Axios API client & communication logic
-├── store/           # Zustand state management for paper & sessions
-├── hooks/           # Custom React hooks for PDF interactions
-└── types/           # Shared TypeScript definitions
+│   ├── upload/      # File upload page
+│   ├── answer/      # Main workspace with PDF + Q&A
+│   └── shared/      # Reusable UI components
+├── services/        # API communication
+├── store/           # State management
+├── hooks/           # Custom React hooks
+└── types/           # TypeScript definitions
 ```
 
-## 🔌 Backend Integration
+## How It Works
 
-The frontend communicates with the **RefHunters Backend** (Node.js).
+1. Upload a PDF or provide a DOI
+2. Ask questions in the chat interface
+3. View AI-generated answers with citations
+4. Click citations to see highlighted text in the PDF
+5. Provide feedback to improve answers
 
-- **Default Port**: `3001`
-- **Configuration**: Set `VITE_API_URL` in your `.env` file.
-
-```bash
-# Example .env
-VITE_API_URL=http://localhost:3001
-```
-
-### Key API Endpoints Used:
-- `POST /upload`: PDF ingestion and session initialization.
-- `POST /query`: Dispatches the multi-agent reasoning flow.
-- `POST /feedback`: Captures user corrections to improve future responses.
-
-## 🛠️ Tech Stack
-
-- **Framework**: React 18
-- **Build Tool**: Vite (Lightning fast HMR)
-- **Styling**: Tailwind CSS
-- **PDF Engine**: PDF.js (via react-pdf)
-- **State**: Zustand (Simple, scalable state)
-- **Markdown**: React-Markdown with syntax highlighting
-
----
-
-## 🏗️ Production Build
-
-To build the application for hosting:
+## Build for Production
 
 ```bash
 npm run build
 ```
 
-The output will be in the `dist/` directory.
+Output will be in the `dist/` directory.
+
+## Dependencies
+
+This frontend requires:
+- **Backend**: RefHunters backend running on port 3001
+- See the main `OPERATIONS_GUIDE.md` for starting the backend
