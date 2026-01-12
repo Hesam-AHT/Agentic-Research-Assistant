@@ -26,7 +26,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:5174', 'http://localhost:5173'],
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -209,6 +212,13 @@ app.post("/api/query", uploadMiddleware, async (req, res) => {
     // CHANGED BY DATE: 2026-01-02 - Extract expertise from request body to fix UI setting issue
     const expertise = req.body.expertise as "novice" | "intermediate" | "expert" | undefined;
 
+    // Persist expertise choice for this session (used by /api/feedback)
+    if (expertise) {
+      const mem = new GlobalMemory(session);
+      await mem.write("expertise", expertise);
+    }
+
+
     console.log(`\n[Server] Processing query for session ${session}`);
     console.log(`Query: ${query}`);
     console.log(`Expertise: ${expertise || 'default (intermediate)'}`);
@@ -225,19 +235,19 @@ app.post("/api/query", uploadMiddleware, async (req, res) => {
     const highlightedSections = mainPaperEvidence?.locations || [];
 
     // Format citations with evidenceChunk for frontend
+    // FIXED: A2 already provides section/page/chunk_id in citation object
+    // Preserve ALL metadata for both main paper and external citations
     const formattedCitations = (result.citations || []).map((citation: any) => {
-      // Get the actual evidence to extract text
-      const evidenceItem = result.evidence?.find((e: any) =>
-        e.title === citation.title && e.section === citation.section
-      );
-
-      // Create evidenceChunk with section text for highlighting
+      // Create evidenceChunk with all available metadata from A2
+      // Don't null out anything - use what A2 provides
       const evidenceChunk = {
-        text: evidenceItem?.text || citation.title || "",  // Section text for search
-        section: citation.section || "Unknown",  // Section name
-        page: citation.page,
+        text: citation.text || "",  // Preserve text if A2 provides it
+        section: citation.section || null,  // Section name (main papers have this)
+        page: citation.page || null,  // Page number
         is_main_paper: citation.is_main_paper || false,
-        locations: citation.locations || null,
+        locations: citation.locations || null,  // Precise text locations for highlighting
+        chunk_id: citation.chunk_id || null,  // Unique chunk identifier
+        pdf_path: citation.pdf_path || null,  // Path to PDF file
       };
 
       return {
@@ -249,9 +259,24 @@ app.post("/api/query", uploadMiddleware, async (req, res) => {
         doi: citation.doi,
         arxiv_id: citation.arxiv_id,
         journal: citation.journal || "",
-        evidenceChunk: evidenceChunk,  // Now includes section text
+        section: citation.section || null,  // Include at top level
+        page: citation.page || null,  // Include at top level
+        chunk_id: citation.chunk_id || null,  // Include at top level
+        is_main_paper: citation.is_main_paper || false,
+        evidenceChunk: evidenceChunk,  // Full metadata object
       };
     });
+
+    // Save evidence to memory for feedback regeneration
+    const memory = new GlobalMemory(session);
+    await memory.write("last_working_state", {
+      last_evidence: result.evidence || [],
+      last_query: query,
+      last_answer: result.answer,
+      timestamp: new Date().toISOString()
+    });
+    console.log(`[Server] Saved ${result.evidence?.length || 0} evidence items to memory for feedback`);
+
 
     res.json({
       sessionId: session,
@@ -313,104 +338,145 @@ app.post("/api/feedback", async (req, res) => {
       return res.status(400).json({ error: "sessionId is required" });
     }
 
-    if (!feedback) {
-      return res.status(400).json({ error: "feedback is required" });
+    if (!feedback || !feedback.rating) {
+      return res.status(400).json({ error: "feedback.rating is required (use 'like' or 'dislike')" });
     }
 
     console.log(`\n[Server] Processing feedback for session ${sessionId}`);
-    console.log(`Feedback:`, feedback);
+    console.log(`Rating: ${feedback.rating}${feedback.style ? `, Style: ${feedback.style}` : ''}`);
 
-    // Build feedback state
-    const feedbackState: FeedbackState = {
-      sessionId,
-      feedback,
-      lastQuery,
-      lastAnswer,
-    };
+    const memory = new GlobalMemory(sessionId);
 
-    // CHANGED BY DATE: 2026-01-02 - Disabled feedback graph and added mock response
-    // // Process feedback
-    // const result: any = await feedbackGraph.invoke(feedbackState);
+    // Get stored expertise (DO NOT CHANGE IT)
+    const storedExpertise = await memory.read<"novice" | "intermediate" | "expert">("expertise") ?? "intermediate";
 
-    // Process feedback
-    // const result: any = await feedbackGraph.invoke(feedbackState);
-    const result: any = { trace: [], decision: { route_to: "none", reason: "Feedback not implemented in this version" } };
+    // LIKE: Save positive feedback and return
+    if (feedback.rating === 'like') {
+      await memory.write("feedback_history", {
+        rating: 'like',
+        query: lastQuery,
+        timestamp: new Date().toISOString()
+      });
 
-    const decision = result.decision;
-    let nextAction = null;
+      return res.json({
+        status: "success",
+        message: "Thank you for your feedback!",
+        action: "none"
+      });
+    }
 
-    // Based on feedback decision, route to appropriate agent
-    if (decision.route_to === "A1") {
-      // Need new knowledge base
-      console.log("[Server] Routing to A1 for new knowledge base");
+    // DISLIKE: Regenerate answer with SAME evidence, different format
+    if (feedback.rating === 'dislike') {
+      console.log("[Server] Regenerating answer with better formatting...");
 
-      // Get blacklist from memory
-      const mem = new GlobalMemory(sessionId);
-      const blacklist = (await mem.read<string[]>("blacklist")) || [];
-
-      const a1Task = {
-        agent: "A1" as const,
-        action: "retrieve" as const,
-        inputs: {
-          query: decision.new_query || lastQuery || "",
-          topN: 40,
-          topK: 8,
-          penalties: { blacklist: blacklist },
-        },
-      };
-
-      const a1Result = await agents.A1.run(a1Task);
-
-      nextAction = {
-        agent: "A1",
-        result: a1Result,
-        message: "New knowledge base created. Would you like a new answer?",
-      };
-    } else if (decision.route_to === "A2") {
-      // Need new answer with existing evidence
-      console.log("[Server] Routing to A2 for new answer");
-
-      // Get last working state if available
-      const memory = new GlobalMemory(sessionId);
+      // Load EXISTING evidence (no new retrieval!)
       const lastWorking = await memory.read("last_working_state");
       const evidence = (lastWorking as any)?.last_evidence || [];
-      console.log(`[Query] Loaded ${evidence.length} evidence items from last working state`);
-
-      // Get blacklist for penalties
-      const blacklist = (await memory.read<string[]>("blacklist")) || [];
 
       if (evidence.length === 0) {
         return res.status(400).json({
-          error: "No evidence available. Please submit a new query first.",
+          error: "No evidence available. Please submit a new query first."
         });
       }
 
+      console.log(`[Server] Using ${evidence.length} existing evidence items`);
+      console.log(`[Server] Keeping expertise: ${storedExpertise}`);
+
+      // Log evidence composition for debugging
+      const mainPaperEvidence = evidence.filter((e: any) => e.is_main_paper);
+      const externalEvidence = evidence.filter((e: any) => !e.is_main_paper);
+      console.log(`[Server] Evidence breakdown: ${mainPaperEvidence.length} main paper sections, ${externalEvidence.length} external papers`);
+
+      if (externalEvidence.length > 0) {
+        console.log(`[Server] External papers available:`);
+        externalEvidence.forEach((e: any, i: number) => {
+          console.log(`  [${i}] ${e.title} (${e.source_type})`);
+        });
+      }
+
+      // Determine format instruction based on feedback style
+      let formatInstruction = "";
+      if (feedback.style === 'categorized') {
+        formatInstruction = " Organize the answer into clear sections with descriptive headings.";
+      } else if (feedback.style === 'shorter') {
+        formatInstruction = " Provide a more concise answer (150-250 words maximum).";
+      } else if (feedback.style === 'longer') {
+        formatInstruction = " Provide a comprehensive, detailed answer (500-800 words).";
+      } else {
+        // Default: just improve structure
+        formatInstruction = " Improve the structure and clarity of the answer.";
+      }
+
+      // Detect if this is a comparison question
+      const isComparison = /\b(compare|comparison|vs\.?|versus|difference|differences|similarities)\b/i.test(lastQuery);
+
+      // If comparison + external evidence exists, FORCE using external evidence
+      if (isComparison && externalEvidence.length > 0 && storedExpertise !== 'novice') {
+        formatInstruction += " IMPORTANT: You must cite and compare with the external reference papers provided in the evidence.";
+        console.log(`[Server] ⚠️  COMPARISON DETECTED - Instructing A2 to use external evidence`);
+      }
+
+      // Call A2 with SAME evidence, SAME expertise, modified query
       const a2Task = {
         agent: "A2" as const,
         action: "reason" as const,
         inputs: {
-          query: lastQuery || "",
+          query: lastQuery + formatInstruction,
           evidence: evidence,
-          expertise: "intermediate",
-          format: feedback.verbosity === "shorter" ? "bullets" : "markdown",
-        },
+          expertise: storedExpertise,  // ✅ KEEP SAME
+          format: "markdown"
+        }
       };
 
-      const a2Result = await agents.A2.run(a2Task);
+      const improvedAnswer = await runA2(a2Task);
 
-      nextAction = {
-        agent: "A2",
-        result: a2Result,
-        message: "New answer generated based on feedback",
-      };
+      console.log(`[Server] Generated improved answer (${improvedAnswer.answer?.length || 0} chars)`);
+
+      // Format citations the same way as the main query endpoint
+      const formattedCitations = (improvedAnswer.citations || []).map((citation: any) => {
+        const evidenceChunk = {
+          text: citation.text || "",
+          section: citation.section || null,
+          page: citation.page || null,
+          is_main_paper: citation.is_main_paper || false,
+          locations: citation.locations || null,
+          chunk_id: citation.chunk_id || null,
+          pdf_path: citation.pdf_path || null,
+        };
+
+        return {
+          index: citation.index,
+          formatted: citation.formatted,
+          title: citation.title,
+          authors: citation.authors || [],
+          year: citation.year || "",
+          doi: citation.doi,
+          arxiv_id: citation.arxiv_id,
+          journal: citation.journal || "",
+          section: citation.section || null,
+          page: citation.page || null,
+          chunk_id: citation.chunk_id || null,
+          is_main_paper: citation.is_main_paper || false,
+          evidenceChunk: evidenceChunk,
+        };
+      });
+
+      console.log(`[Server] Formatted ${formattedCitations.length} citations for feedback response`);
+
+      return res.json({
+        status: "success",
+        message: "Generated improved answer",
+        action: "regenerated",
+        answer: improvedAnswer.answer,
+        citations: formattedCitations,  // Use formatted citations
+        metadata: improvedAnswer.metadata
+      });
     }
 
-    res.json({
-      sessionId,
-      decision: decision.reason,
-      nextAction,
-      trace: result.trace || [],
+    return res.status(400).json({
+      error: "Invalid feedback.rating (use 'like' or 'dislike')"
     });
+
   } catch (error) {
     console.error("[Server] Error processing feedback:", error);
     res.status(500).json({

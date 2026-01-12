@@ -36,6 +36,24 @@ export interface Citation {
   doi: string;
 }
 
+// JSON-schema-friendly citation shape for tool parameters
+const CitationParamSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    title: { type: "string", description: "Paper title." },
+    authors: {
+      type: "array",
+      items: { type: "string" },
+      description: "Author names (if available).",
+    },
+    year: { type: "string", description: "Publication year (if available)." },
+    journal: { type: "string", description: "Venue/journal/conference name (if available)." },
+    doi: { type: "string", description: "DOI (if available)." },
+  },
+  required: ["title"],
+} as const;
+
 export interface TextLocation {
   paragraph: number;
   line: number;
@@ -93,8 +111,9 @@ class AgentState {
     return this.citations;
   }
 
-  addEvidence(evidence: Evidence) {
+  addEvidence(evidence: Evidence): number {
     this.evidence.push(evidence);
+    return this.evidence.length - 1;
   }
 
   getEvidence(): Evidence[] {
@@ -432,65 +451,160 @@ ${blob}`;
 }
 
 
-async function searchArxiv(title: string): Promise<string | null> {
-  try {
-    const url = `https://export.arxiv.org/api/query?search_query=ti:"${encodeURIComponent(title)}"&max_results=1`;
-    const response = await axios.get(url);
-    const xml = response.data;
+// Helper: Sleep function for rate limit delays
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-    const match = xml.match(/<id>https?:\/\/arxiv\.org\/abs\/(.+?)<\/id>/);
-    return match ? match[1] : null;
-  } catch (error) {
-    console.error("arXiv search failed:", error);
-    return null;
+// MERGED: Search arXiv and download PDF in one function (with rate limit handling)
+async function searchAndDownloadArxivPaper(title: string): Promise<{
+  success: boolean;
+  arxivId?: string;
+  pdfPath?: string;
+  error?: string;
+}> {
+  const maxRetries = 3;
+  const baseDelay = 1500;  // arXiv rate limit is aggressive, use 1.5s delay
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Delay before each attempt to avoid rate limiting
+      if (attempt > 0) {
+        const retryDelay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s, 8s...
+        console.log(`[A1] Retry ${attempt}/${maxRetries} after ${retryDelay}ms delay...`);
+        await sleep(retryDelay);
+      }
+
+      // Step 1: Search arXiv for paper by title
+      console.log(`[A1] Searching arXiv for: "${title}"`);
+
+      // Add delay before API call
+      await sleep(baseDelay);
+
+      const searchUrl = `https://export.arxiv.org/api/query?search_query=ti:"${encodeURIComponent(title)}"&max_results=1`;
+      const searchResponse = await axios.get(searchUrl, {
+        headers: {
+          'User-Agent': 'RefHunters/1.0 (mailto:admin@example.com) Axios/1.6.5'
+        }
+      });
+      const xml = searchResponse.data;
+
+      const match = xml.match(/<id>https?:\/\/arxiv\.org\/abs\/(.+?)<\/id>/);
+      if (!match) {
+        console.log(`[A1] Paper not found on arXiv: "${title}"`);
+        return { success: false, error: "Paper not found on arXiv" };
+      }
+
+      const arxivId = match[1];
+      console.log(`[A1] Found arXiv paper: ${arxivId}`);
+
+      // Step 2: Download PDF (with delay)
+      console.log(`[A1] Downloading PDF for ${arxivId}...`);
+
+      // Add delay before PDF download
+      await sleep(baseDelay);
+
+      const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
+      const pdfResponse = await axios.get(pdfUrl, {
+        responseType: "arraybuffer",
+        timeout: 30000,
+        headers: {
+          'User-Agent': 'RefHunters/1.0 (mailto:admin@example.com) Axios/1.6.5'
+        }
+      });
+
+      if (pdfResponse.status !== 200) {
+        return { success: false, arxivId, error: "PDF download failed" };
+      }
+
+      // Save PDF
+      const safe = title.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
+      const downloadDir = "downloads";
+
+      if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true });
+      }
+
+      const pdfPath = path.join(downloadDir, `${safe}.pdf`);
+      fs.writeFileSync(pdfPath, pdfResponse.data);
+
+      console.log(`[A1] ✅ Successfully downloaded to: ${pdfPath}`);
+      return { success: true, arxivId, pdfPath };
+
+    } catch (error: any) {
+      const status = error?.response?.status;
+      // Handle rate limit errors (429) or service unavailable (503)
+      if (status === 429 || status === 503) {
+        console.log(`[A1] ⚠️  arXiv API ${status}. Attempt ${attempt + 1}/${maxRetries}`);
+        if (attempt < maxRetries - 1) {
+          continue; // Retry with exponential backoff
+        } else {
+          console.error(`[A1] ❌ Max retries reached for arXiv ${status}`);
+          return { success: false, error: `arXiv ${status} after retries` };
+        }
+      }
+
+      // Other errors - don't retry
+      console.error("[A1] arXiv search and download failed:", error.message || error);
+      return { success: false, error: String(error.message || error) };
+    }
   }
+
+  return { success: false, error: "Max retries exceeded" };
 }
 
-async function downloadPdf(arxivId: string, title: string): Promise<boolean> {
-  try {
-    const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
-    const response = await axios.get(pdfUrl, {
-      responseType: "arraybuffer",
-      timeout: 30000,
-    });
-
-    if (response.status !== 200) {
-      return false;
-    }
-
-    const safe = title.replace(/[^a-zA-Z0-9]/g, "_") || "untitled";
-    const downloadDir = "downloads";
-
-    if (!fs.existsSync(downloadDir)) {
-      fs.mkdirSync(downloadDir, { recursive: true });
-    }
-
-    fs.writeFileSync(path.join(downloadDir, `${safe}.pdf`), response.data);
-    return true;
-  } catch (error) {
-    console.error("PDF download failed:", error);
-    return false;
-  }
-}
 
 async function fetchArxivAbstract(arxivId: string): Promise<string | null> {
-  try {
-    const url = `https://export.arxiv.org/api/query?id_list=${arxivId}`;
-    const response = await axios.get(url);
-    const xml = response.data;
+  const maxRetries = 3;
+  const baseDelay = 1500;  // arXiv rate limit is aggressive, use 1.5s delay
 
-    const match = xml.match(/<summary>(.*?)<\/summary>/s);
-    if (!match) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Delay before each attempt
+      if (attempt > 0) {
+        const retryDelay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s, 8s...
+        console.log(`[A1] Retrying abstract fetch ${attempt}/${maxRetries} after ${retryDelay}ms...`);
+        await sleep(retryDelay);
+      }
+
+      // Add delay before API call
+      await sleep(baseDelay);
+
+      const url = `https://export.arxiv.org/api/query?id_list=${arxivId}`;
+      const response = await axios.get(url, {
+        headers: {
+          'User-Agent': 'RefHunters/1.0 (mailto:admin@example.com) Axios/1.6.5'
+        }
+      });
+      const xml = response.data;
+
+      const match = xml.match(/<summary>(.*?)<\/summary>/s);
+      if (!match) {
+        return null;
+      }
+
+      let abstract = match[1].trim();
+      abstract = abstract.replace(/\s+/g, " ");
+      return abstract;
+
+    } catch (error: any) {
+      const status = error?.response?.status;
+      // Handle rate limit errors (429) or service unavailable (503)
+      if (status === 429 || status === 503) {
+        console.log(`[A1] ⚠️  Abstract fetch arXiv ${status}. Attempt ${attempt + 1}/${maxRetries}`);
+        if (attempt < maxRetries - 1) {
+          continue; // Retry
+        } else {
+          console.error(`[A1] ❌ Abstract fetch: Max retries for arXiv ${status}`);
+          return null;
+        }
+      }
+
+      // Other errors
+      console.error("Abstract fetch failed:", error.message || error);
       return null;
     }
-
-    let abstract = match[1].trim();
-    abstract = abstract.replace(/\s+/g, " ");
-    return abstract;
-  } catch (error) {
-    console.error("Abstract fetch failed:", error);
-    return null;
   }
+
+  return null;
 }
 
 // TOOL DEFINITIONS
@@ -499,9 +613,13 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "extract_citations_from_pdf",
-      description: "Extract all citations from a research paper PDF using GROBID.",
+      description:
+        "[INGEST ONLY] Extract and cache structured citations from a local PDF using GROBID. " +
+        "Call ONLY when citation cache is empty. Call get_available_citations first. " +
+        "Returns: { success:boolean, count:number, sample_titles:string[], error?:string }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           pdf_path: {
             type: "string",
@@ -516,9 +634,12 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_available_citations",
-      description: "Get all currently extracted citations in memory.",
+      description:
+        "[FAST] Get cached citations already in memory. Call this before extract_citations_from_pdf. " +
+        "Returns: { success:boolean, count:number, citations:Array<{index:number,title:string,year?:string,doi?:string}> }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {},
       },
     },
@@ -527,31 +648,40 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "filter_citations",
-      description: "Filter extracted citations based on keywords.",
+      description:
+        "[FAST] Filter cached citations by a query string (title/authors). " +
+        "Returns citation_index for each match (use it in read_and_add_to_evidence / fetch_paper_abstract). " +
+        "Returns: { success:boolean, count:number, citations:Array<{citation_index:number,title:string,authors:string[],year:string,journal:string,doi?:string}> }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
-          keyword: {
+          query: {
             type: "string",
-            description: "Search term to filter citations",
+            description: "Search query (keywords, author, paper name)",
           },
           max_results: {
-            type: "number",
+            type: "integer",
+            minimum: 1,
+            maximum: 100,
             description: "Maximum number of results",
-            default: 40,
+            default: 12,
           },
         },
-        required: ["keyword"],
+        required: ["query"],
       },
     },
   },
   {
     type: "function",
     function: {
-      name: "search_paper_on_arxiv",
-      description: "Search for a paper on arXiv by title.",
+      name: "search_and_download_paper_on_arxiv",
+      description:
+        "Search arXiv by title and download the best matching PDF. " +
+        "Returns: { success:boolean, arxiv_id?:string, pdf_path?:string, error?:string }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           title: {
             type: "string",
@@ -562,48 +692,85 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
       },
     },
   },
+
+
+  // Keep fetch_paper_abstract - it's separate functionality
   {
     type: "function",
     function: {
-      name: "download_paper_pdf",
-      description: "Download PDF from arXiv.",
+      name: "fetch_paper_abstract",
+      description:
+        "Fetch arXiv abstract (fallback when PDF download fails). " +
+        "Optionally add the abstract to evidence when citation_index/citation is provided. " +
+        "Returns: { success:boolean, abstract?:string, added_to_evidence?:boolean, evidence_index?:number, error?:string }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           arxiv_id: {
             type: "string",
             description: "arXiv ID",
           },
-          title: {
-            type: "string",
-            description: "Paper title",
+          citation_index: {
+            type: "integer",
+            description: "Index into cached citations returned by filter_citations (preferred)",
+          },
+          citation: {
+            ...CitationParamSchema,
+            description: "Fallback citation metadata if citation_index is unavailable",
+          },
+          add_to_evidence: {
+            type: "boolean",
+            description: "If true, store the abstract as an evidence item",
+            default: true,
+          },
+          max_chars: {
+            type: "integer",
+            minimum: 200,
+            maximum: 50000,
+            description: "Max characters to store when add_to_evidence=true",
+            default: 5000,
           },
         },
-        required: ["arxiv_id", "title"],
+        required: ["arxiv_id"],
       },
     },
   },
-
-  // CHANGED BY DATE: 2026-01-03 - Updated tool to accept citation metadata
+  // CHANGED BY DATE: 2026-01-03 - New combined tool to read PDF and add to evidence in one step
   {
     type: "function",
     function: {
-      name: "read_downloaded_pdf",
-      description: "Read the full text content of a downloaded PDF file. IMPORTANT: Always pass the citation object so metadata is preserved for add_to_evidence.",
+      name: "read_and_add_to_evidence",
+      description:
+        "Read a downloaded PDF and add it to evidence, preserving citation metadata. " +
+        "Prefer passing citation_index from filter_citations rather than copying citation objects. " +
+        "Returns: { success:boolean, evidence_index?:number, title?:string, text_length?:number, error?:string }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           pdf_path: {
             type: "string",
-            description: "Path to the local PDF file",
+            description: "Path to the downloaded PDF file",
+          },
+          citation_index: {
+            type: "integer",
+            description: "Index into cached citations returned by filter_citations (preferred)",
           },
           citation: {
-            type: "object",
-            description: "The original citation object from filter_citations (title, authors, year, etc.)",
+            ...CitationParamSchema,
+            description: "Fallback citation metadata if citation_index is unavailable",
           },
           arxiv_id: {
             type: "string",
             description: "The arXiv ID of the paper",
+          },
+          max_chars: {
+            type: "integer",
+            minimum: 1000,
+            maximum: 200000,
+            description: "Maximum characters of extracted PDF text to store",
+            default: 20000,
           },
         },
         required: ["pdf_path"],
@@ -613,83 +780,11 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "fetch_paper_abstract",
-      description: "Fetch abstract from arXiv.",
-      parameters: {
-        type: "object",
-        properties: {
-          arxiv_id: {
-            type: "string",
-            description: "arXiv ID",
-          },
-        },
-        required: ["arxiv_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "add_to_evidence",
-      description: "Add citation with content to evidence collection.",
-      parameters: {
-        type: "object",
-        properties: {
-          citation: {
-            type: "object",
-            description: "Citation object",
-          },
-          arxiv_id: {
-            type: "string",
-            description: "arXiv ID",
-          },
-          content_type: {
-            type: "string",
-            enum: ["pdf", "abstract", "metadata_only"],
-            description: "Content type",
-          },
-          text: {
-            type: "string",
-            description: "Content text",
-          },
-        },
-        required: ["citation", "content_type", "text"],
-      },
-    },
-  },
-  // CHANGED BY DATE: 2026-01-03 - New combined tool to read PDF and add to evidence in one step
-  {
-    type: "function",
-    function: {
-      name: "read_and_add_to_evidence",
-      description: "Read a downloaded PDF and immediately add it to evidence. Use this INSTEAD of read_downloaded_pdf + add_to_evidence. This ensures citation metadata is preserved.",
-      parameters: {
-        type: "object",
-        properties: {
-          pdf_path: {
-            type: "string",
-            description: "Path to the downloaded PDF file",
-          },
-          citation: {
-            type: "object",
-            description: "The citation object from filter_citations (must include title, authors, year, journal)",
-          },
-          arxiv_id: {
-            type: "string",
-            description: "The arXiv ID of the paper",
-          },
-        },
-        required: ["pdf_path", "citation"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "check_if_blacklisted",
-      description: "Check if DOI is blacklisted.",
+      description: "Check whether a DOI is blacklisted. Returns: { success:boolean, blacklisted:boolean }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           doi: {
             type: "string",
@@ -709,9 +804,12 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "extract_text_from_main_paper",
-      description: "Extract text from the main uploaded paper with paragraph and line tracking.",
+      description:
+        "Extract text from the main uploaded paper with paragraph and line tracking. " +
+        "Returns: { success:boolean, paragraphs_count:number, total_lines:number, error?:string }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           pdf_path: {
             type: "string",
@@ -726,13 +824,22 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "search_main_paper_text",
-      description: "Search for text in the main paper and get location details (paragraph, line, sentence).",
+      description:
+        "Search cached main paper text and return matching locations/snippets. " +
+        "Returns: { success:boolean, count:number, locations:TextLocation[], snippets:Array<{paragraph:number,line:number,start_sentence:string,full_line:string}> }",
       parameters: {
         type: "object",
+        additionalProperties: false,
         properties: {
           query: {
             type: "string",
             description: "Text to search for in the main paper",
+          },
+          max_results: {
+            type: "integer",
+            minimum: 1,
+            maximum: 200,
+            default: 20,
           },
         },
         required: ["query"],
@@ -740,6 +847,25 @@ const tools: OpenAI.Chat.ChatCompletionTool[] = [
     },
   },
 ];
+
+// Helper function to check if a title matches the main paper
+function isMainPaperTitle(title: string): boolean {
+  const mainPaper = agentState.getMainPaper();
+  if (!mainPaper.path) return false;
+
+  const mainPaperFilename = path.basename(mainPaper.path);
+  const mainPaperTitle = mainPaperFilename
+    .replace(/_/g, " ")
+    .replace(/-?\d+-\d+\.pdf$/i, "")
+    .replace(".pdf", "")
+    .trim()
+    .toLowerCase();
+
+  const searchTitle = title.toLowerCase().trim();
+
+  // Check if they match (contains or is contained)
+  return searchTitle.includes(mainPaperTitle) || mainPaperTitle.includes(searchTitle);
+}
 
 // TOOL EXECUTION
 async function executeFunction(
@@ -766,7 +892,7 @@ async function executeFunction(
       return {
         success: true,
         count: citations.length,
-        sample: citations.slice(0, 3).map((c) => c.title),
+        sample_titles: citations.slice(0, 3).map((c) => c.title),
       };
     }
 
@@ -785,32 +911,38 @@ async function executeFunction(
     }
 
     case "filter_citations": {
-      const { keyword, max_results = 40 } = args;
-      console.log(`[A1]  Filtering citations by keyword: "${keyword}"`);
+      // Backwards compatible: accept either {query} or {keyword}
+      const query: string = (args.query ?? args.keyword ?? "").toString();
+      const max_results: number = Number.isFinite(args.max_results) ? Math.floor(args.max_results) : 40;
+
+      console.log(`[A1]  Filtering citations by query: "${query}"`);
       const allCitations = agentState.getCitations();
 
       // CHANGED BY DATE: 2026-01-03 - Robust multi-keyword filtering
       const stopWords = new Set(["and", "the", "a", "an", "of", "in", "on", "with", "between", "comparison", "compare", "architecture", "model", "paper", "is", "for", "to", "at", "by", "that", "this", "which", "are", "it"]);
-      const keywords = keyword.toLowerCase()
+      const keywords = query.toLowerCase()
         .split(/[\s,.;:?!()]+/)
         .filter((word: string) => word.length > 2 && !stopWords.has(word));
 
       console.log(`[A1]  Extracted keywords: ${JSON.stringify(keywords)}`);
 
-      const filtered = allCitations.filter((c: any, index: number) => {
-        const titleLower = (c.title || "").toLowerCase();
-        const authorsLower = (c.authors || []).map((a: string) => a.toLowerCase());
+      // Keep citation indices stable by carrying original indices through filtering
+      const filtered = allCitations
+        .map((c: any, index: number) => ({ c, index }))
+        .filter(({ c, index }) => {
+          const titleLower = (c.title || "").toLowerCase();
+          const authorsLower = (c.authors || []).map((a: string) => a.toLowerCase());
 
-        const isMatch = keywords.some((kw: string) =>
-          titleLower.includes(kw) ||
-          authorsLower.some((author: string) => author.includes(kw))
-        );
+          const isMatch = keywords.some((kw: string) =>
+            titleLower.includes(kw) ||
+            authorsLower.some((author: string) => author.includes(kw))
+          );
 
-        if (isMatch) {
-          console.log(`[A1]  MATCH FOUND at index ${index}: "${c.title}"`);
-        }
-        return isMatch;
-      });
+          if (isMatch) {
+            console.log(`[A1]  MATCH FOUND at index ${index}: "${c.title}"`);
+          }
+          return isMatch;
+        });
 
       const result = filtered.slice(0, max_results);
       console.log(`[A1] Filter found ${result.length} matches`);
@@ -818,110 +950,135 @@ async function executeFunction(
       return {
         success: true,
         count: result.length,
-        citations: result,
+        citations: result.map(({ c, index }) => ({
+          citation_index: index,
+          title: c.title,
+          authors: c.authors || [],
+          year: c.year || "",
+          journal: c.journal || "",
+          doi: c.doi || "",
+        })),
       };
     }
 
-    case "search_paper_on_arxiv": {
+    case "search_and_download_paper_on_arxiv": {
       const { title } = args;
-      console.log(`[A1]  Searching arXiv for: "${title}"`);
-      const arxivId = await searchArxiv(title);
-      console.log(`[A1] ${arxivId ? " Found arXiv ID: " + arxivId : " Not found on arXiv"}`);
+      console.log(`[A1] 🔍 Searching and downloading from arXiv: "${title}"`);
+
+      // BLOCK downloading main paper
+      if (isMainPaperTitle(title)) {
+        console.log(`[A1] ⛔ BLOCKED: This is the main paper (already uploaded). Skipping download.`);
+        return {
+          success: false,
+          arxiv_id: null,
+          pdf_path: null,
+          error: "Blocked: This is the main paper (already uploaded)"
+        };
+      }
+
+      const result = await searchAndDownloadArxivPaper(title);
+
+      if (result.success) {
+        console.log(`[A1] ✅ Success! arXiv ID: ${result.arxivId}, Path: ${result.pdfPath}`);
+      } else {
+        console.log(`[A1] ❌ Failed: ${result.error}`);
+      }
 
       return {
-        success: !!arxivId,
-        arxiv_id: arxivId,
-      };
-    }
-
-    case "download_paper_pdf": {
-      const { arxiv_id, title } = args;
-      console.log(`[A1]  Downloading PDF: ${arxiv_id} (${title})`);
-      const success = await downloadPdf(arxiv_id, title);
-      const safe = title.replace(/[^a-zA-Z0-9]/g, "_");
-      console.log(`[A1] ${success ? " Download success" : " Download failed"}`);
-
-      return {
-        success,
-        path: success ? `downloads/${safe}.pdf` : null,
+        success: result.success,
+        arxiv_id: result.arxivId,
+        pdf_path: result.pdfPath,
+        error: result.error,
       };
     }
 
     // CHANGED BY DATE: 2026-01-02 - Added tool to read full text of downloaded references
-    case "read_downloaded_pdf": {
-      const { pdf_path } = args;
-      console.log(`[A1] Request to read PDF: ${pdf_path}`);
-      if (!fs.existsSync(pdf_path)) {
-        console.error(`[A1]  PDF file not found: ${pdf_path}`);
-        return { success: false, error: `PDF not found: ${pdf_path}` };
-      }
-
-      console.log(`[A1]  Reading full text content...`);
-      const extracted = await extractTextWithLocations(pdf_path);
-
-      // CHANGED BY DATE: 2026-01-03 - Truncate to 20k chars to avoid rate limit errors
-      const MAX_CHARS = 20000;
-      const truncatedText = extracted.fullText.length > MAX_CHARS
-        ? extracted.fullText.substring(0, MAX_CHARS) + "\n[... truncated ...]"
-        : extracted.fullText;
-
-      console.log(`[A1]  Extracted ${extracted.fullText.length} chars, using ${truncatedText.length} chars`);
-
-      return {
-        success: true,
-        text_preview: truncatedText.substring(0, 200) + "...",
-        full_text: truncatedText, // Truncated to avoid rate limits
-        length: truncatedText.length
-      };
-    }
 
     case "fetch_paper_abstract": {
-      const { arxiv_id } = args;
+      const arxiv_id: string = (args.arxiv_id ?? "").toString();
+      const add_to_evidence: boolean = args.add_to_evidence !== false;
+      const max_chars: number = Number.isFinite(args.max_chars) ? Math.floor(args.max_chars) : 5000;
+      const citation_index: number | undefined = Number.isFinite(args.citation_index)
+        ? Math.floor(args.citation_index)
+        : undefined;
+
+      // Prefer citation_index lookup; fall back to provided citation
+      let citation: Partial<Citation> | undefined = args.citation;
+      if (citation_index !== undefined) {
+        const all = agentState.getCitations();
+        if (citation_index >= 0 && citation_index < all.length) {
+          citation = all[citation_index];
+        }
+      }
+
+      // BLOCK fetching abstract for main paper
+      const titleToCheck = citation?.title || arxiv_id;
+      if (isMainPaperTitle(titleToCheck)) {
+        console.log(`[A1] ⛔ BLOCKED: Not fetching abstract for main paper (already uploaded).`);
+        return {
+          success: false,
+          abstract: null,
+          added_to_evidence: false,
+          error: "Blocked: This is the main paper (already uploaded)"
+        };
+      }
+
       console.log(`[A1]  Fetching abstract for: ${arxiv_id}`);
       const abstract = await fetchArxivAbstract(arxiv_id);
       console.log(`[A1] ${abstract ? "Abstract fetched" : " Abstract fetch failed"}`);
 
-
-      return {
-        success: !!abstract,
-        abstract: abstract || null,
-      };
-    }
-
-    case "add_to_evidence": {
-      const { citation, arxiv_id, content_type, text } = args;
-
-      if (!citation || !citation.title) {
-        console.warn(`[A1] Warning: add_to_evidence called without a title!`);
-        // Try to rescue it?
-        if (!citation) {
-          return { success: false, error: "Missing citation object" };
-        }
+      if (!abstract) {
+        return {
+          success: false,
+          abstract: null,
+          added_to_evidence: false,
+          error: "Abstract fetch failed",
+        };
       }
 
-      console.log(`[A1] Adding evidence: "${citation.title}" (${content_type})`);
+      let evidence_index: number | undefined = undefined;
+      if (add_to_evidence) {
+        const trimmed = abstract.length > max_chars ? abstract.slice(0, max_chars) + "\n[... truncated ...]" : abstract;
 
-      const evidence: Evidence = {
-        title: citation.title || "Unknown Title", // Fallback to avoid undefined
-        authors: citation.authors || [],
-        year: citation.year || "",
-        journal: citation.journal || "",
-        doi: citation.doi,
-        arxiv_id,
-        text,
-        source_type: content_type,
-      };
-
-      agentState.addEvidence(evidence);
+        const title = (citation?.title || "Untitled (arXiv)").toString();
+        const evidence: Evidence = {
+          title,
+          authors: (citation?.authors as any) || [],
+          year: (citation?.year || "").toString(),
+          journal: (citation?.journal || "").toString(),
+          doi: (citation as any)?.doi || "",
+          arxiv_id,
+          text: trimmed,
+          source_type: "abstract",
+        };
+        evidence_index = agentState.addEvidence(evidence);
+      }
 
       return {
         success: true,
+        abstract,
+        added_to_evidence: add_to_evidence,
+        evidence_index,
       };
     }
 
+
     // CHANGED BY DATE: 2026-01-03 - Combined tool that reads PDF and adds to evidence in one step
     case "read_and_add_to_evidence": {
-      let { pdf_path, citation, arxiv_id } = args;
+      let { pdf_path, arxiv_id } = args;
+      const max_chars: number = Number.isFinite(args.max_chars) ? Math.floor(args.max_chars) : 20000;
+      const citation_index: number | undefined = Number.isFinite(args.citation_index)
+        ? Math.floor(args.citation_index)
+        : undefined;
+
+      // Prefer citation_index lookup; fall back to provided citation
+      let citation: Partial<Citation> | undefined = args.citation;
+      if (citation_index !== undefined) {
+        const all = agentState.getCitations();
+        if (citation_index >= 0 && citation_index < all.length) {
+          citation = all[citation_index];
+        }
+      }
 
       // CHANGED BY DATE: 2026-01-03 - Auto-lookup citation if missing or incomplete
       if (!citation || !citation.title || citation.title === "NO TITLE") {
@@ -949,9 +1106,16 @@ async function executeFunction(
       console.log(`[A1] read_and_add_to_evidence: "${citation?.title || 'NO TITLE'}"`);
       console.log(`[A1]   PDF: ${pdf_path}`);
 
+      // If citation is still missing, fall back to filename-based metadata so we still capture text.
       if (!citation || !citation.title) {
-        console.error(`[A1]   ERROR: Citation missing or no title!`);
-        return { success: false, error: "Citation object with title is required. Ensure you pass the object from filter_citations." };
+        console.warn(`[A1]   WARNING: Missing citation metadata. Falling back to filename-based title.`);
+        citation = {
+          title: path.basename(pdf_path || "downloaded_paper.pdf"),
+          authors: [],
+          year: "",
+          journal: "",
+          doi: "",
+        };
       }
 
       if (!fs.existsSync(pdf_path)) {
@@ -961,33 +1125,33 @@ async function executeFunction(
 
       // Read and truncate
       const extracted = await extractTextWithLocations(pdf_path);
-      const MAX_CHARS = 20000;
-      const truncatedText = extracted.fullText.length > MAX_CHARS
-        ? extracted.fullText.substring(0, MAX_CHARS) + "\n[... truncated ...]"
+      const truncatedText = extracted.fullText.length > max_chars
+        ? extracted.fullText.substring(0, max_chars) + "\n[... truncated ...]"
         : extracted.fullText;
 
       console.log(`[A1]   Extracted ${extracted.fullText.length} chars, using ${truncatedText.length}`);
 
       // Create evidence with full metadata
       const evidence: Evidence = {
-        title: citation.title,
-        authors: citation.authors || [],
-        year: citation.year || "",
-        journal: citation.journal || "",
-        doi: citation.doi,
+        title: citation.title || "Unknown Paper",
+        authors: (citation.authors as any) || [],
+        year: (citation.year || "").toString(),
+        journal: (citation.journal || "").toString(),
+        doi: (citation as any)?.doi || "",
         arxiv_id: arxiv_id || "",
         text: truncatedText,
         source_type: "pdf",
         pdf_path: pdf_path,
       };
 
-      agentState.addEvidence(evidence);
+      const evidence_index = agentState.addEvidence(evidence);
       console.log(`[A1]   SUCCESS: Added to evidence!`);
 
       return {
         success: true,
         title: citation.title,
         text_length: truncatedText.length,
+        evidence_index,
       };
     }
 
@@ -1018,7 +1182,8 @@ async function executeFunction(
     }
 
     case "search_main_paper_text": {
-      const { query } = args;
+      const query: string = (args.query ?? "").toString();
+      const max_results: number = Number.isFinite(args.max_results) ? Math.floor(args.max_results) : 20;
       const mainPaper = agentState.getMainPaper();
 
       if (!mainPaper.text) {
@@ -1028,7 +1193,8 @@ async function executeFunction(
         };
       }
 
-      const locations = findTextLocations(query, mainPaper.text);
+      const allLocations = findTextLocations(query, mainPaper.text);
+      const locations = allLocations.slice(0, Math.max(1, max_results));
       const snippets = locations.map(loc => {
         const para = mainPaper.text!.paragraphs.find(p => p.paragraphNumber === loc.paragraph);
         const line = para?.lines.find(l => l.lineNumber === loc.line);
@@ -1061,25 +1227,27 @@ async function runAgent(
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content: `You are Agent A1, a Data & Evidence Agent.
+      content: `You are Agent A1 (Evidence Builder). You do NOT answer the user.
+You only collect citations and build an evidence set for Agent A2.
 
-Your role:
-1. Extract citations from PDFs
-2. Search and retrieve papers from arXiv
-3. Build evidence collections
+Golden rules:
+- Obey retrieval budget: if topK is 0 (or limit says 0 evidence items), do NOT download external papers or fetch abstracts.
+- Before extracting citations, call get_available_citations. If count > 0, do NOT call extract_citations_from_pdf.
+- Prefer citation_index over copying citation objects.
 
-CRITICAL WORKFLOW:
-1. Filter citations by keyword
-2. For each matching citation:
-   a. Search on arXiv
-   b. Download PDF
-   c. Use "read_and_add_to_evidence" (NOT separate read + add!)
-      - Pass the citation object with title, authors, year
-      - Pass the arxiv_id
-      - This adds to evidence automatically
+Retrieval workflow (for comparisons / related work / references):
+1) filter_citations(query) to find candidates.
+2) Pick up to topK diverse papers.
+3) For each selected paper:
+   - If DOI exists, call check_if_blacklisted(doi). Skip if blacklisted.
+   - search_and_download_paper_on_arxiv(title)
+   - If download succeeds: read_and_add_to_evidence(pdf_path, citation_index, arxiv_id)
+   - If download fails: fetch_paper_abstract(arxiv_id, citation_index, add_to_evidence=true)
 
-IMPORTANT: Always pass the full citation object to read_and_add_to_evidence.
-Do NOT use read_downloaded_pdf + add_to_evidence separately - use the combined tool!`,
+Main paper support:
+- extract_text_from_main_paper is done during ingest; use search_main_paper_text(query) only when you need pinpoint snippets/locations.
+
+Stop once you collected enough evidence (topK). Avoid redundant tool calls.`,
     },
     {
       role: "user",
@@ -1170,7 +1338,12 @@ export async function run(task: A1Task): Promise<A1Result> {
 
       // CHANGED BY DATE: 2026-01-04 - Extract sections using GROBID
       const filename = path.basename(mainPaperPath);
-      const cleanTitle = filename.replace(/_/g, " ").replace(/-?\d+-\d+\.pdf$/i, "").replace(".pdf", "");
+      // Robust title cleaning: remove underscores, timestamps (-1234567 or -123-456), and .pdf extension
+      const cleanTitle = filename
+        .replace(/_/g, " ")
+        .replace(/-?\d+(?:-\d+)?(?=\.pdf|$)/i, "")
+        .replace(/\.pdf$/i, "")
+        .trim();
 
       const evidence: Evidence[] = [];
 
@@ -1271,8 +1444,12 @@ export async function run(task: A1Task): Promise<A1Result> {
 
           // Add main paper as evidence with location info
           const mainFile = path.basename(mainPaper.path || "Main_Paper.pdf");
-          // Remove ID-suffix for cleaner title if possible, or just use basename
-          const cleanTitle = mainFile.replace(/-\d+-\d+\.pdf$/i, "").replace(/_/g, " ");
+          // Robust title cleaning: remove underscores, timestamps (-1234567 or -123-456), and .pdf extension
+          const cleanTitle = mainFile
+            .replace(/_/g, " ")
+            .replace(/-?\d+(?:-\d+)?(?=\.pdf|$)/i, "")
+            .replace(/\.pdf$/i, "")
+            .trim();
 
           const mainPaperEvidence: Evidence = {
             title: cleanTitle || "Main Paper",
@@ -1295,26 +1472,47 @@ export async function run(task: A1Task): Promise<A1Result> {
         }
       }
 
+
+      // Expertise/policy may set topK=0 (main-paper-only mode). In that case, skip external retrieval.
+      if (topK <= 0) {
+        const mainOnly = agentState.getEvidence().filter(e => e.is_main_paper);
+        return {
+          agent: "A1",
+          status: "success",
+          evidence: mainOnly,
+        };
+      }
+
+      // CHANGED BY DATE: 2026-01-08 - Extract main paper title to prevent downloading it
+      const mainPaperPath = mainPaper.path || "";
+      const mainPaperFilename = path.basename(mainPaperPath);
+      const mainPaperTitle = mainPaperFilename
+        .replace(/_/g, " ")
+        .replace(/-?\d+-\d+\.pdf$/i, "")
+        .replace(".pdf", "")
+        .trim();
+
       // CHANGED BY DATE: 2026-01-02 - Updated prompt to use full text reading
       const taskStr = `Build a knowledge base about "${query}".
 
 Steps:
 1. Filter citations for "${query}" (top ${topN})
 2. For each citation:
-   - Search on arXiv
-   - Download PDF
-   - IF PDF download succeeds: Use 'read_downloaded_pdf' to get full text
+   - SKIP if the citation title matches the main paper: "${mainPaperTitle}" (already uploaded!)
+   - Otherwise: Search and download from arXiv (combined tool)
+   - Use 'read_and_add_to_evidence' to read PDF and add to evidence (single step!)
    - IF PDF fails: Use 'fetch_paper_abstract'
-   - Add to evidence
 3. Skip blacklisted DOIs: ${JSON.stringify(blacklist)}
-4. Limit to ${topK} evidence items (excluding main paper)`;
+4. Limit to ${topK} evidence items (excluding main paper)
+
+IMPORTANT: Do NOT download or fetch abstracts for papers with titles containing "${mainPaperTitle}" - this is the main paper that's already uploaded!`;
 
       await runAgent(taskStr);
 
       // Ensure main paper evidence is included
       const allEvidence = agentState.getEvidence();
       const mainPaperEvidence = allEvidence.find(e => e.is_main_paper);
-      const otherEvidence = allEvidence.filter(e => !e.is_main_paper).slice(0, topK - (mainPaperEvidence ? 1 : 0));
+      const otherEvidence = allEvidence.filter(e => !e.is_main_paper).slice(0, topK);
 
       const finalEvidence = mainPaperEvidence
         ? [mainPaperEvidence, ...otherEvidence]

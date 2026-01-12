@@ -35,11 +35,13 @@ type PolicyPlan = {
 const Planner = new Agent({
   name: "A0-Planner",
   model: "gpt-4o-mini",
-  instructions: `
-You are A0 (controller). You never answer questions.
-You only decide policy.
+  instructions: `You are A0 (controller). You never answer questions.
+You only decide policy and retrieval permission.
 
-Return STRICT JSON:
+Input JSON contains:
+{ "userInput": string, "sources": string[], "format"?: string, "expertise"?: "novice"|"intermediate"|"expert" }
+
+Return STRICT JSON ONLY:
 
 {
   "mode": "main_only" | "allow_citations",
@@ -47,12 +49,15 @@ Return STRICT JSON:
   "format": "markdown" | "latex" | "html"
 }
 
-Rules:
-- If a paper is provided AND user does NOT ask for citations/references/related work/comparisons → main_only, allow_external_retrieval=false
-- If user mentions "references", "citations", "related work", "comparison", "compare", or specific paper names/keywords → allow_citations, allow_external_retrieval=true
-- If no paper is provided → allow_external_retrieval=true
-- Default format: markdown
-`,
+Rules (check in order):
+- Default format: markdown (unless user explicitly asks for latex/html or input.format provided)
+- If a paper is provided AND user asks a Q&A question (what is/what are/how does/how do/how works/explain/describe/summarize/summary/overview/tell me about) → mode=main_only, allow_external_retrieval=false
+- If a paper is provided AND user does NOT ask for citations/references/related work/comparisons → mode=main_only, allow_external_retrieval=false
+- If a paper is provided AND the question is a comparison (compare/vs/difference/similarities):
+  - If expertise is "novice" → mode=main_only, allow_external_retrieval=false (use only the provided paper)
+  - Else ("intermediate"|"expert") → mode=allow_citations, allow_external_retrieval=true
+- If user explicitly asks for "references"/"citations"/"related work" → mode=allow_citations, allow_external_retrieval=true (unless the novice+compare rule above applies)
+- If no paper is provided → allow_external_retrieval=true`,
 });
 
 /* =========================
@@ -79,7 +84,7 @@ export async function runA0(input: {
   /* ---------- POLICY PLAN ---------- */
   const planRes = await run(
     Planner,
-    JSON.stringify({ userInput, sources, format })
+    JSON.stringify({ userInput, sources, format, expertise })
   );
 
   const raw = planRes.finalOutput;
@@ -88,7 +93,21 @@ export async function runA0(input: {
   }
 
   // CHANGED BY DATE: 2026-01-03 - Use robust parser to handle markdown wrapping
-  const plan: PolicyPlan = parseLLMJson<PolicyPlan>(raw);
+  let plan: PolicyPlan = parseLLMJson<PolicyPlan>(raw);
+
+  /* ---------- EXPERTISE-BASED RETRIEVAL OVERRIDES ---------- */
+  const isCompare = /\b(compare|comparison|vs\.?|versus|difference|differences|similarities)\b/i.test(
+    userInput
+  );
+
+  // Beginner/novice + compare + paper provided => main paper ONLY (no external downloads)
+  if (sources.length > 0 && isCompare && expertise === "novice") {
+    plan = {
+      ...plan,
+      mode: "main_only",
+      allow_external_retrieval: false,
+    };
+  }
 
 
   /* ---------- STORE MAIN PAPER ---------- */
@@ -124,14 +143,18 @@ export async function runA0(input: {
   }
 
   /* ---------- RETRIEVAL DECISION (A1 AGAIN) ---------- */
-  if (plan.allow_external_retrieval) {
+  const topKByExpertise =
+    expertise === "expert" ? 10 : expertise === "intermediate" ? 6 : 0;
+
+  // Only retrieve external references when policy allows AND budget > 0
+  if (plan.allow_external_retrieval && topKByExpertise > 0) {
     const searchTask: A1Task = {
       agent: "A1",
       action: "retrieve",
       inputs: {
         query: userInput,
         topN: 40,
-        topK: 8,
+        topK: topKByExpertise,
         penalties: { blacklist },
       },
     };
@@ -141,7 +164,6 @@ export async function runA0(input: {
     evidence.push(...searchEvidence);
   }
 
-  // CHANGED BY DATE: 2026-01-02 - Removed manual "PREPARE EVIDENCE" block since A1 now handles it above (reverted quick fix)
 
   /* ---------- HARD POLICY ENFORCEMENT ---------- */
   // CHANGED BY DATE: 2026-01-02 - Modified strict policy violation to a filter
@@ -163,11 +185,16 @@ export async function runA0(input: {
   }
 
   /* ---------- REASONING (A2) ---------- */
+  let a2Query = userInput;
+  if (isCompare && expertise !== "novice" && plan.allow_external_retrieval) {
+    a2Query += "\n\n(Note: This is a comparison question. Please compare the main paper (Side A) with the external papers (Side B) provided in the evidence. Be sure to represent both sides fairly using their respective evidence chunks.)";
+  }
+
   const a2Task: A2Task = {
     agent: "A2",
     action: "reason",
     inputs: {
-      query: userInput,
+      query: a2Query,
       evidence,
       expertise,
       format: plan.format,
@@ -186,7 +213,10 @@ export async function runA0(input: {
     at: new Date().toISOString(),
   });
 
-  return a2Result;
+  return {
+    ...a2Result,
+    evidence: evidence  // Add evidence to return value for feedback
+  };
 }
 
 

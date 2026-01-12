@@ -22,6 +22,11 @@ export default function AnswerPage() {
     const [activeCitationIndex, setActiveCitationIndex] = useState<number | null>(null)
     const messagesEndRef = useRef<HTMLDivElement>(null)
 
+    // Feedback system state
+    const [feedbackRatings, setFeedbackRatings] = useState<Record<string, 'like' | 'dislike' | null>>({})
+    const [showStyleOptions, setShowStyleOptions] = useState<string | null>(null)
+    const [isRegenerating, setIsRegenerating] = useState(false)
+
 
     // Handle citation click for PDF highlighting - TEXT SEARCH BASED
     const handleCitationClick = async (citation: any) => {
@@ -56,8 +61,8 @@ export default function AnswerPage() {
         }
 
         // PRIORITY 2: Use section text for search (first 200 chars)
-        if (text && file) {
-            const searchText = text.substring(0, 200)  // First 200 chars of section
+        if (section && file) {
+            const searchText = section  // Use section NAME like "Abstract", not full text!
             console.log(`[Citation Click] 🔍 Searching PDF for section text: "${searchText.substring(0, 60)}..."`)
 
             setHighlights([{
@@ -72,6 +77,88 @@ export default function AnswerPage() {
             console.log('[Citation Click]  Initiated text search')
         } else {
             console.log('[Citation Click] No text available for highlighting')
+        }
+    }
+
+    // Feedback handler
+    const handleFeedback = async (messageId: string, rating: 'like' | 'dislike', style?: string) => {
+        const message = messages.find(m => m.id === messageId)
+        if (!message) return
+
+        console.log('[Feedback] Called with:', { messageId, rating, style })
+
+        // If already liked, don't allow changes
+        if (feedbackRatings[messageId] === 'like') {
+            console.log('[Feedback] Already liked, ignoring')
+            return
+        }
+
+        if (rating === 'like') {
+            // Just save positive feedback
+            setFeedbackRatings(prev => ({ ...prev, [messageId]: 'like' }))
+
+            try {
+                await fetch('http://localhost:3001/api/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId,
+                        feedback: { rating: 'like' },
+                        lastQuery: question,
+                        lastAnswer: message.content
+                    })
+                })
+                console.log('[Feedback] Like saved')
+            } catch (err) {
+                console.error('[Feedback] Error:', err)
+            }
+            return
+        }
+
+        // Dislike: Show style options first
+        if (!style) {
+            console.log('[Feedback] Showing style options')
+            setShowStyleOptions(messageId)
+            setFeedbackRatings(prev => ({ ...prev, [messageId]: 'dislike' }))
+            return
+        }
+
+        // Regenerate with selected style
+        console.log('[Feedback] Regenerating with style:', style)
+        setIsRegenerating(true)
+        try {
+            const response = await fetch('http://localhost:3001/api/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId,
+                    feedback: { rating: 'dislike', style },
+                    lastQuery: question,
+                    lastAnswer: message.content
+                })
+            })
+
+            const data = await response.json()
+            console.log('[Feedback] Response:', data)
+
+            if (data.action === 'regenerated' && data.answer) {
+                // Replace the answer in messages
+                setMessages(prev => prev.map(msg =>
+                    msg.id === messageId
+                        ? { ...msg, content: data.answer, citations: data.citations }
+                        : msg
+                ))
+
+                // Reset feedback for new answer
+                setFeedbackRatings(prev => ({ ...prev, [messageId]: null }))
+                setShowStyleOptions(null)
+                console.log('[Feedback] Answer regenerated successfully')
+            }
+        } catch (err) {
+            console.error('[Feedback] Error:', err)
+            alert('Failed to regenerate answer')
+        } finally {
+            setIsRegenerating(false)
         }
     }
 
@@ -280,6 +367,69 @@ export default function AnswerPage() {
                                                             </div>
                                                         ))}
                                                     </div>
+                                                </div>
+                                            )}
+
+                                            {/* Feedback buttons */}
+                                            {msg.type === 'answer' && (
+                                                <div className="mt-4 pt-4 border-t">
+                                                    <p className="text-sm text-gray-600 mb-3">Was this answer helpful?</p>
+
+                                                    {!feedbackRatings[msg.id] && (
+                                                        <div className="flex gap-3">
+                                                            <button
+                                                                onClick={() => handleFeedback(msg.id, 'like')}
+                                                                className="px-4 py-2 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg transition"
+                                                                disabled={isRegenerating}
+                                                            >
+                                                                👍 Yes
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleFeedback(msg.id, 'dislike')}
+                                                                className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition"
+                                                                disabled={isRegenerating}
+                                                            >
+                                                                👎 No
+                                                            </button>
+                                                        </div>
+                                                    )}
+
+                                                    {feedbackRatings[msg.id] === 'like' && (
+                                                        <div className="text-green-600 font-medium">✓ Thanks for your feedback!</div>
+                                                    )}
+
+                                                    {feedbackRatings[msg.id] === 'dislike' && showStyleOptions === msg.id && !isRegenerating && (
+                                                        <div className="mt-3">
+                                                            <p className="text-sm mb-2 font-medium">How should we improve it?</p>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                <button
+                                                                    onClick={() => handleFeedback(msg.id, 'dislike', 'categorized')}
+                                                                    className="px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition text-sm"
+                                                                >
+                                                                    📋 More organized
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleFeedback(msg.id, 'dislike', 'shorter')}
+                                                                    className="px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition text-sm"
+                                                                >
+                                                                    ⚡ Shorter
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleFeedback(msg.id, 'dislike', 'longer')}
+                                                                    className="px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition text-sm"
+                                                                >
+                                                                    📖 More detailed
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {isRegenerating && (
+                                                        <div className="flex items-center gap-2 text-blue-600">
+                                                            <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full" />
+                                                            <span>Regenerating answer...</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>

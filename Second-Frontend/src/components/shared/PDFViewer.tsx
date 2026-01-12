@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import type { Highlight } from '../../types/pdf'
+import { Network } from 'lucide-react'
 
 // Configure PDF.js worker - use npm package
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -223,6 +224,13 @@ export default function PDFViewer({ file, highlights = [] }: PDFViewerProps) {
                 </div>
 
                 <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => console.log('Generate Knowledge Graph clicked')}
+                        className="p-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center justify-center mr-2"
+                        title="Generate Knowledge Graph"
+                    >
+                        <Network size={20} />
+                    </button>
                     <button
                         onClick={zoomOut}
                         className="px-3 py-1 bg-gray-600 text-white rounded hover:bg-gray-700"
